@@ -316,8 +316,7 @@ function render() {
       : historyView()
   )
   app.appendChild(wrap)
-  if (state.user) mountGlobalChat()
-  document.body.classList.toggle('chat-open', !!(state.user && state.globalChat.open))
+  mountGlobalChat()
 }
 
 function header() {
@@ -832,10 +831,20 @@ function historyView() {
 let _gcPollTimer = null
 
 function mountGlobalChat() {
-  document.getElementById('globalChat')?.remove()
-  if (!state.globalChat.open) return
+  const open = !!(state.user && state.globalChat.open)
+  document.body.classList.toggle('chat-open', open)
 
-  const panel = el(`<div id="globalChat" class="gc-panel">
+  // Panel already exists — just show/hide, don't rebuild
+  const existing = document.getElementById('globalChat')
+  if (existing) {
+    existing.style.display = open ? 'flex' : 'none'
+    return
+  }
+
+  // First-time creation — only if user is logged in
+  if (!state.user) return
+
+  const panel = el(`<div id="globalChat" class="gc-panel" style="display:${open ? 'flex' : 'none'}">
     <div class="gc-head">
       <span class="gc-title">💬 Global Chat</span>
       <button class="gc-close" id="gcClose">✕</button>
@@ -847,7 +856,11 @@ function mountGlobalChat() {
   </div>`)
 
   document.body.appendChild(panel)
-  panel.querySelector('#gcClose').onclick = () => { state.globalChat.open = false; render() }
+  panel.querySelector('#gcClose').onclick = () => {
+    state.globalChat.open = false
+    panel.style.display = 'none'
+    document.body.classList.remove('chat-open')
+  }
 
   const msgsEl = panel.querySelector('#gcMsgs')
   const input = panel.querySelector('#gcInput')
