@@ -21,6 +21,8 @@ const state = {
   myInv: [],
   theirInv: [],
   tradeBuilder: { offer: [], request: [] },
+  // profile lookup
+  profileUser: null, // { username, stats, ads, inventory }
   // chat
   globalChat: { open: false, messages: [], lastId: null },
   dms: { conversations: [], unread: 0, activeId: null, activeName: null, messages: [] },
@@ -313,6 +315,7 @@ function render() {
       : state.tab === 'create' ? createView()
       : state.tab === 'offers' ? offersView()
       : state.tab === 'messages' ? messagesView()
+      : state.tab === 'players' ? playersView()
       : historyView()
   )
   app.appendChild(wrap)
@@ -354,7 +357,7 @@ function header() {
 function tabs() {
   const t = el('<div class="tabs"></div>')
   const unread = state.dms.unread
-  const defs = [['market', 'Marketplace'], ['create', 'Post a Trade'], ['offers', 'Offers'], ['inventory', 'My Inventory'], ['history', 'Recent Trades'], ['messages', unread ? `Messages <span class="badge">${unread}</span>` : 'Messages']]
+  const defs = [['market', 'Marketplace'], ['create', 'Post a Trade'], ['offers', 'Offers'], ['inventory', 'My Inventory'], ['history', 'Recent Trades'], ['messages', unread ? `Messages <span class="badge">${unread}</span>` : 'Messages'], ['players', 'Players']]
   defs.forEach(([id, label]) => {
     const d = el(`<div class="tab ${state.tab === id ? 'active' : ''}">${label}</div>`)
     d.querySelector('.badge')?.addEventListener('click', (e) => e.stopPropagation())
@@ -892,6 +895,86 @@ function mountGlobalChat() {
   pollChat()
 }
 
+async function openProfile(username) {
+  state.tab = 'players'
+  state.profileUser = { username, loading: true, stats: null, ads: [], inventory: [] }
+  render()
+  try {
+    const d = await api.get(`/api/users/profile?username=${encodeURIComponent(username)}&game=${state.game}`)
+    state.profileUser = { username, loading: false, ...d }
+  } catch (e) {
+    state.profileUser = { username, loading: false, error: e.message, stats: null, ads: [], inventory: [] }
+  }
+  render()
+}
+
+function playersView() {
+  const wrap = el('<div></div>')
+
+  // Search bar
+  const searchRow = el('<div class="players-search-row"></div>')
+  const input = el('<input class="players-input" placeholder="Search by Roblox username…" autocomplete="off" />')
+  const btn = el('<button class="btn">Look Up</button>')
+  searchRow.appendChild(input)
+  searchRow.appendChild(btn)
+  wrap.appendChild(searchRow)
+
+  const doSearch = () => { const u = input.value.trim(); if (u) openProfile(u) }
+  btn.onclick = doSearch
+  input.onkeydown = (e) => { if (e.key === 'Enter') doSearch() }
+
+  const p = state.profileUser
+  if (!p) { wrap.appendChild(el('<div class="empty" style="margin-top:40px">Enter a username to view their profile.</div>')); return wrap }
+
+  if (p.loading) { wrap.appendChild(el('<div class="empty" style="margin-top:40px">Loading…</div>')); return wrap }
+  if (p.error) { wrap.appendChild(el(`<div class="empty" style="margin-top:40px">User not found.</div>`)); return wrap }
+
+  // Profile header
+  const head = el(`<div class="profile-head">
+    <div class="profile-name">${escHtml(p.username)}</div>
+    <div class="profile-stats">
+      <div class="profile-stat"><div class="profile-stat-val">${p.stats?.completedTrades ?? 0}</div><div class="profile-stat-label">Trades Completed</div></div>
+      <div class="profile-stat"><div class="profile-stat-val">${p.ads?.length ?? 0}</div><div class="profile-stat-label">Active Listings</div></div>
+      <div class="profile-stat"><div class="profile-stat-val">${p.inventory?.length ?? 0}</div><div class="profile-stat-label">Items Held</div></div>
+    </div>
+    ${state.user && state.user.username !== p.username ? `<div class="profile-actions">
+      <button class="btn" id="profOffer">🤝 Make Offer</button>
+      <button class="btn ghost" id="profDm">💬 DM</button>
+    </div>` : ''}
+  </div>`)
+  head.querySelector('#profOffer')?.addEventListener('click', () => openDirectOffer(p.username))
+  head.querySelector('#profDm')?.addEventListener('click', () => openDmWith(null, p.username))
+  wrap.appendChild(head)
+
+  // Active trades
+  wrap.appendChild(el('<h3 class="inv-h" style="margin:28px 0 12px">Active Trades</h3>'))
+  if (!p.ads?.length) {
+    wrap.appendChild(el('<div class="empty">No open trades.</div>'))
+  } else {
+    const grid = el('<div class="profile-ads"></div>')
+    p.ads.forEach((ad) => grid.appendChild(adCard(ad)))
+    wrap.appendChild(grid)
+  }
+
+  // Inventory
+  wrap.appendChild(el('<h3 class="inv-h" style="margin:28px 0 12px">Inventory</h3>'))
+  if (!p.inventory?.length) {
+    wrap.appendChild(el('<div class="empty">No items.</div>'))
+  } else {
+    const grid = el('<div class="pickgrid"></div>')
+    p.inventory.forEach((it) => {
+      grid.appendChild(el(`<div class="pickcard">
+        ${itemImg(it.item, 'pick-img')}
+        <div class="pick-n">${it.item}</div>
+        <div class="pick-r">${it.rarity ?? ''}${tierChip(it.item)} · ×${it.qty}</div>
+      </div>`))
+    })
+    wrap.appendChild(grid)
+  }
+
+  return wrap
+}
+
 function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
 }
@@ -900,15 +983,16 @@ function userPopover(e, username) {
   e.stopPropagation()
   document.getElementById('userPopover')?.remove()
   const pop = el(`<div id="userPopover" class="user-pop">
-    <button class="user-pop-btn" id="upDm">💬 Send DM</button>
+    <button class="user-pop-btn" id="upProfile">👤 View Profile</button>
     <button class="user-pop-btn" id="upOffer">🤝 Make Offer</button>
+    <button class="user-pop-btn" id="upDm">💬 Send DM</button>
   </div>`)
-  // position near the click
   pop.style.top = (e.clientY + window.scrollY + 4) + 'px'
   pop.style.left = (e.clientX + window.scrollX) + 'px'
   document.body.appendChild(pop)
-  pop.querySelector('#upDm').onclick = () => { pop.remove(); openDmWith(null, username) }
+  pop.querySelector('#upProfile').onclick = () => { pop.remove(); openProfile(username) }
   pop.querySelector('#upOffer').onclick = () => { pop.remove(); openDirectOffer(username) }
+  pop.querySelector('#upDm').onclick = () => { pop.remove(); openDmWith(null, username) }
   const dismiss = () => { pop.remove(); document.removeEventListener('click', dismiss) }
   setTimeout(() => document.addEventListener('click', dismiss), 0)
 }

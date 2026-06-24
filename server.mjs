@@ -602,6 +602,20 @@ const server = http.createServer(async (req, res) => {
       const other = db.users.get(id)
       return send(res, 200, { user: { id: other.id, username: other.username } })
     }
+    if (path === '/api/users/profile' && method === 'GET') {
+      const u = sessionUser(req); if (!u) return send(res, 401, { error: 'Not logged in' })
+      const username = (url.searchParams.get('username') || '').toLowerCase()
+      const game = url.searchParams.get('game') || 'growagarden'
+      const id = db.byName.get(username)
+      if (!id) return send(res, 404, { error: 'User not found' })
+      const other = db.users.get(id)
+      const ads = db.ads.filter((a) => a.userId === id && a.game === game && a.status === 'open').slice(0, 20)
+        .map((a) => ({ id: a.id, username: a.username, note: a.note, offering: a.offering, requesting: a.requesting, mine: a.userId === u.id }))
+      const inv = db.inventories.get(id)?.get(game)
+      const inventory = inv ? [...inv.entries()].filter(([, q]) => q > 0).map(([item, qty]) => ({ item, qty, rarity: '' })) : []
+      const completedTrades = db.trades.filter((t) => (t.seller === other.username || t.buyer === other.username) && t.game === game).length
+      return send(res, 200, { username: other.username, stats: { completedTrades }, ads, inventory })
+    }
 
     // --- Deposit info ---
     if (path === '/api/deposit/info' && method === 'GET') {

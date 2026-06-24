@@ -613,6 +613,21 @@ export default async function handler(req, res) {
       if (!row) return res.status(404) && json({ error: 'User not found' })
       return json({ user: row })
     }
+    if (path === '/users/profile' && method === 'GET') {
+      const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
+      const username = (url.searchParams.get('username') || '').trim()
+      const game = url.searchParams.get('game') || 'growagarden'
+      const row = (await sql`SELECT id, roblox_username FROM users WHERE LOWER(roblox_username)=LOWER(${username})`)[0]
+      if (!row) return res.status(404) && json({ error: 'User not found' })
+      const [adsRows, invRows, countRow] = await Promise.all([
+        sql`SELECT * FROM rex_trade_ads WHERE user_id=${row.id} AND game=${game} AND status='open' ORDER BY created_at DESC LIMIT 20`,
+        sql`SELECT item, qty FROM rex_inventories WHERE user_id=${row.id} AND game=${game} AND qty > 0 ORDER BY item`,
+        sql`SELECT COUNT(*) FROM rex_trade_ads WHERE game=${game} AND status='completed' AND (user_id=${row.id} OR buyer_id=${row.id})`,
+      ])
+      const ads = adsRows.map((a) => ({ id: a.id, username: a.username, note: a.note, offering: a.offering, requesting: a.requesting, mine: a.user_id === u.id }))
+      const inventory = invRows.map((r) => ({ item: r.item, qty: r.qty, rarity: '' }))
+      return json({ username: row.roblox_username, stats: { completedTrades: Number(countRow[0].count) }, ads, inventory })
+    }
 
     // --- Deposit info ---
     if (path === '/deposit/info' && method === 'GET') {
