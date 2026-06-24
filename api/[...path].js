@@ -226,6 +226,13 @@ async function fetchRobloxBio(robloxId) {
   const data = await res.json()
   return data?.description || ''
 }
+async function fetchAvatarUrl(robloxId) {
+  try {
+    const res = await fetch(`https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=${robloxId}&size=150x150&format=Png&isCircular=false`)
+    const data = await res.json()
+    return data?.data?.[0]?.imageUrl || null
+  } catch { return null }
+}
 function parseCookies(header = '') {
   return Object.fromEntries(header.split(';').map((c) => c.trim().split('=')).filter((p) => p[0]).map((p) => [p[0], decodeURIComponent(p[1] || '')]))
 }
@@ -448,7 +455,18 @@ export default async function handler(req, res) {
 
     if (path === '/me' && method === 'GET') {
       const u = await sessionUser(req)
-      return json({ user: u ? { id: u.id, username: u.username, role: u.role } : null })
+      if (!u) return json({ user: null })
+      const avatar = u.roblox_id ? await fetchAvatarUrl(u.roblox_id) : null
+      return json({ user: { id: u.id, username: u.username, role: u.role, avatar } })
+    }
+    if (path === '/avatar' && method === 'GET') {
+      const username = (url.searchParams.get('username') || '').trim()
+      if (!username) return res.status(400) && json({ error: 'username required' })
+      const row = (await sql`SELECT roblox_id FROM users WHERE LOWER(roblox_username)=LOWER(${username})`)[0]
+        || (await sql`SELECT roblox_id FROM users WHERE LOWER(username)=LOWER(${username})`)[0]
+      if (!row?.roblox_id) return json({ url: null })
+      const avatarUrl = await fetchAvatarUrl(row.roblox_id)
+      return json({ url: avatarUrl })
     }
     if (path === '/logout' && method === 'POST') {
       const sid = parseCookies(req.headers.cookie || '').rex_sid
@@ -643,7 +661,8 @@ export default async function handler(req, res) {
       ])
       const ads = adsRows.map((a) => ({ id: a.id, username: a.username, note: a.note, offering: a.offering, requesting: a.requesting, mine: a.user_id === u.id }))
       const inventory = invRows.map((r) => ({ item: r.item, qty: r.qty, rarity: '' }))
-      return json({ username: row.roblox_username, targetId: row.id, stats: { completedTrades: Number(countRow[0].count), thumbsUp: Number(repRow[0].count), hasThumbedUp: myVote.length > 0 }, ads, inventory })
+      const avatar = row.roblox_id ? await fetchAvatarUrl(row.roblox_id) : null
+      return json({ username: row.roblox_username, targetId: row.id, avatar, stats: { completedTrades: Number(countRow[0].count), thumbsUp: Number(repRow[0].count), hasThumbedUp: myVote.length > 0 }, ads, inventory })
     }
 
     // --- Deposit info ---

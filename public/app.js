@@ -346,7 +346,7 @@ function header() {
     const wd = el('<button class="btn" style="margin-left:8px">Withdraw</button>')
     wd.onclick = () => withdrawModal()
     center.appendChild(wd)
-    ua.innerHTML = `<span class="who">Signed in as <b>${state.user.username}</b></span>`
+    ua.innerHTML = `${state.user.avatar ? `<img class="nav-avatar" src="${state.user.avatar}" alt="" onerror="this.style.display='none'">` : ''}<span class="who">Signed in as <b>${state.user.username}</b></span>`
     const btn = el('<button class="btn ghost" style="margin-left:12px">Logout</button>')
     btn.onclick = async () => { await api.post('/api/logout'); state.user = null; render() }
     ua.appendChild(btn)
@@ -932,7 +932,10 @@ function playersView() {
   const isOther = state.user && state.user.username !== p.username
   const voted = p.stats?.hasThumbedUp
   const head = el(`<div class="profile-head">
-    <div class="profile-name">${escHtml(p.username)}</div>
+    <div class="profile-top">
+      ${p.avatar ? `<img class="profile-avatar" src="${p.avatar}" alt="${escHtml(p.username)}" onerror="this.style.display='none'">` : '<div class="profile-avatar-placeholder"></div>'}
+      <div class="profile-name">${escHtml(p.username)}</div>
+    </div>
     <div class="profile-stats">
       <div class="profile-stat"><div class="profile-stat-val">${p.stats?.completedTrades ?? 0}</div><div class="profile-stat-label">Trades Completed</div></div>
       <div class="profile-stat"><div class="profile-stat-val">${p.stats?.thumbsUp ?? 0}</div><div class="profile-stat-label">Thumbs Up</div></div>
