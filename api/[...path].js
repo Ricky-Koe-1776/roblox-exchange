@@ -147,6 +147,25 @@ async function ensureInit() {
       status     TEXT NOT NULL DEFAULT 'pending',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`
+  await sql`
+    CREATE TABLE IF NOT EXISTS rex_chat_messages (
+      id         TEXT PRIMARY KEY,
+      user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      username   TEXT NOT NULL,
+      message    TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`
+  await sql`
+    CREATE TABLE IF NOT EXISTS rex_dm_messages (
+      id         TEXT PRIMARY KEY,
+      from_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      from_name  TEXT NOT NULL,
+      to_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      to_name    TEXT NOT NULL,
+      message    TEXT NOT NULL,
+      read       BOOLEAN NOT NULL DEFAULT false,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`
   _initDone = true
 }
 
@@ -483,6 +502,80 @@ export default async function handler(req, res) {
         ? await sql`SELECT username, buyer_name, offering, requesting, completed_at FROM rex_trade_ads WHERE game=${game} AND status='completed' AND (username=${name} OR buyer_name=${name}) AND (offering::text ILIKE ${pat} OR requesting::text ILIKE ${pat}) ORDER BY completed_at DESC LIMIT ${PAGE} OFFSET ${offset}`
         : await sql`SELECT username, buyer_name, offering, requesting, completed_at FROM rex_trade_ads WHERE game=${game} AND status='completed' AND (offering::text ILIKE ${pat} OR requesting::text ILIKE ${pat}) ORDER BY completed_at DESC LIMIT ${PAGE} OFFSET ${offset}`
       return json({ trades: rows.map((t) => ({ seller: t.username, buyer: t.buyer_name, offering: t.offering, requesting: t.requesting, completedAt: t.completed_at })), page, totalPages })
+    }
+
+    // --- Global chat ---
+    if (path === '/chat/global' && method === 'GET') {
+      const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
+      const before = url.searchParams.get('before') // ISO timestamp for pagination
+      const rows = before
+        ? await sql`SELECT id, username, message, created_at FROM rex_chat_messages WHERE created_at < ${before} ORDER BY created_at DESC LIMIT 50`
+        : await sql`SELECT id, username, message, created_at FROM rex_chat_messages ORDER BY created_at DESC LIMIT 50`
+      return json({ messages: rows.reverse() })
+    }
+    if (path === '/chat/global' && method === 'POST') {
+      const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
+      const msg = (req.body?.message || '').trim().slice(0, 200)
+      if (!msg) return res.status(400) && json({ error: 'Message cannot be empty' })
+      const id = crypto.randomUUID()
+      await sql`INSERT INTO rex_chat_messages (id, user_id, username, message) VALUES (${id},${u.id},${u.username},${msg})`
+      return json({ ok: true, id })
+    }
+
+    // --- DMs ---
+    if (path === '/chat/dms' && method === 'GET') {
+      const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
+      // Get latest message per conversation partner
+      const rows = await sql`
+        SELECT DISTINCT ON (partner_id)
+          partner_id, partner_name, message, created_at, read, from_id
+        FROM (
+          SELECT to_id AS partner_id, to_name AS partner_name, message, created_at, read, from_id
+          FROM rex_dm_messages WHERE from_id=${u.id}
+          UNION ALL
+          SELECT from_id AS partner_id, from_name AS partner_name, message, created_at, read, from_id
+          FROM rex_dm_messages WHERE to_id=${u.id}
+        ) t
+        ORDER BY partner_id, created_at DESC`
+      const unread = await sql`SELECT COUNT(*)::int AS n FROM rex_dm_messages WHERE to_id=${u.id} AND read=false`
+      return json({ conversations: rows, unreadTotal: unread[0]?.n || 0 })
+    }
+    if ((m = path.match(/^\/chat\/dms\/([^/]+)$/)) && method === 'GET') {
+      const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
+      const otherId = m[1]
+      const rows = await sql`
+        SELECT id, from_id, from_name, to_id, to_name, message, created_at, read
+        FROM rex_dm_messages
+        WHERE (from_id=${u.id} AND to_id=${otherId}) OR (from_id=${otherId} AND to_id=${u.id})
+        ORDER BY created_at ASC LIMIT 200`
+      // Mark received messages as read
+      await sql`UPDATE rex_dm_messages SET read=true WHERE to_id=${u.id} AND from_id=${otherId} AND read=false`
+      return json({ messages: rows })
+    }
+    if ((m = path.match(/^\/chat\/dms\/([^/]+)$/)) && method === 'POST') {
+      const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
+      const otherId = m[1]
+      const msg = (req.body?.message || '').trim().slice(0, 500)
+      if (!msg) return res.status(400) && json({ error: 'Message cannot be empty' })
+      const other = (await sql`SELECT id, username FROM users WHERE id=${otherId}`)[0]
+      if (!other) return res.status(400) && json({ error: 'User not found' })
+      const id = crypto.randomUUID()
+      await sql`INSERT INTO rex_dm_messages (id, from_id, from_name, to_id, to_name, message)
+        VALUES (${id},${u.id},${u.username},${other.id},${other.username},${msg})`
+      return json({ ok: true, id })
+    }
+    if (path === '/chat/unread' && method === 'GET') {
+      const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
+      const r = await sql`SELECT COUNT(*)::int AS n FROM rex_dm_messages WHERE to_id=${u.id} AND read=false`
+      return json({ unread: r[0]?.n || 0 })
+    }
+    // Look up a user's id by username (for opening DMs)
+    if (path === '/users/lookup' && method === 'GET') {
+      const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
+      const username = (url.searchParams.get('username') || '').toLowerCase()
+      const row = (await sql`SELECT id, username FROM users WHERE LOWER(username)=${username}`)[0]
+      if (!row) return res.status(404) && json({ error: 'User not found' })
+      return json({ user: row })
     }
 
     // --- Deposit info ---

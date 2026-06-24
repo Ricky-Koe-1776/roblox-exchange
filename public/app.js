@@ -4,7 +4,7 @@ const state = {
   user: null,
   games: [],
   game: 'growagarden',
-  tab: 'market', // market | inventory | history | create
+  tab: 'market', // market | inventory | history | create | messages
   ads: [],
   inventory: [],
   history: [],
@@ -21,6 +21,9 @@ const state = {
   myInv: [],
   theirInv: [],
   tradeBuilder: { offer: [], request: [] },
+  // chat
+  globalChat: { open: false, messages: [], lastId: null },
+  dms: { conversations: [], unread: 0, activeId: null, activeName: null, messages: [] },
 }
 
 const api = {
@@ -259,6 +262,17 @@ async function refresh() {
     state.history = d.trades; state.historyTotalPages = d.totalPages || 1; state.historyPage = d.page || 1
   }
   if (state.tab === 'offers') state.offers = state.user ? (await api.get(`/api/offers?box=${state.offerBox}`)).offers : []
+  if (state.tab === 'messages' && state.user) {
+    const d = await api.get('/api/chat/dms')
+    state.dms.conversations = d.conversations || []
+    state.dms.unread = d.unreadTotal || 0
+    if (state.dms.activeId) {
+      const t = await api.get(`/api/chat/dms/${state.dms.activeId}`)
+      state.dms.messages = t.messages || []
+      state.dms.unread = Math.max(0, state.dms.unread - (t.messages || []).filter(m => m.to_id === state.user.id && !m.read).length)
+    }
+  }
+  if (state.user) { const r = await api.get('/api/chat/unread'); state.dms.unread = r.unread || 0 }
   render()
 }
 
@@ -298,9 +312,11 @@ function render() {
       : state.tab === 'inventory' ? inventoryView()
       : state.tab === 'create' ? createView()
       : state.tab === 'offers' ? offersView()
+      : state.tab === 'messages' ? messagesView()
       : historyView()
   )
   app.appendChild(wrap)
+  if (state.user) mountGlobalChat()
 }
 
 function header() {
@@ -327,6 +343,9 @@ function header() {
     const wd = el('<button class="btn" style="margin-left:8px">Withdraw</button>')
     wd.onclick = () => withdrawModal()
     center.appendChild(wd)
+    const chatBtn = el('<button class="btn ghost" style="margin-left:8px" id="gcToggle">💬 Chat</button>')
+    chatBtn.onclick = () => { state.globalChat.open = !state.globalChat.open; render() }
+    center.appendChild(chatBtn)
     ua.innerHTML = `<span class="who">Signed in as <b>${state.user.username}</b></span>`
     const btn = el('<button class="btn ghost" style="margin-left:12px">Logout</button>')
     btn.onclick = async () => { await api.post('/api/logout'); state.user = null; render() }
@@ -337,9 +356,11 @@ function header() {
 
 function tabs() {
   const t = el('<div class="tabs"></div>')
-  const defs = [['market', 'Marketplace'], ['create', 'Post a Trade'], ['offers', 'Offers'], ['inventory', 'My Inventory'], ['history', 'Recent Trades']]
+  const unread = state.dms.unread
+  const defs = [['market', 'Marketplace'], ['create', 'Post a Trade'], ['offers', 'Offers'], ['inventory', 'My Inventory'], ['history', 'Recent Trades'], ['messages', unread ? `Messages <span class="badge">${unread}</span>` : 'Messages']]
   defs.forEach(([id, label]) => {
     const d = el(`<div class="tab ${state.tab === id ? 'active' : ''}">${label}</div>`)
+    d.querySelector('.badge')?.addEventListener('click', (e) => e.stopPropagation())
     d.onclick = () => { state.tab = id; refresh() }
     t.appendChild(d)
   })
@@ -401,7 +422,7 @@ function adCard(ad) {
   const hasTags = ad.requesting.some((r) => r.tag)
   const ad_el = el(`<div class="ad ad-mkt">
     <div class="ad-head">
-      <div class="ad-user"><span class="seller">${ad.username}</span>${ad.note ? `<span class="note">"${ad.note}"</span>` : ''}</div>
+      <div class="ad-user"><span class="seller dm-link" data-uname="${ad.username}">${ad.username}</span>${ad.note ? `<span class="note">"${ad.note}"</span>` : ''}</div>
       <div class="ad-actions"></div>
     </div>
     <div class="ad-body">
@@ -410,6 +431,7 @@ function adCard(ad) {
       <div class="side"><div class="label">Requesting</div><div class="items">${ad.requesting.map(entryPill).join('')}</div></div>
     </div>
   </div>`)
+  if (!ad.mine) ad_el.querySelector('.dm-link').onclick = () => openDmWith(null, ad.username)
   const actions = ad_el.querySelector('.ad-actions')
   const view = el('<button class="btn ghost">View</button>')
   view.onclick = () => viewTrade(ad)
@@ -802,6 +824,153 @@ function historyView() {
     </div>`))
   })
   c.appendChild(pager(state.historyPage, state.historyTotalPages, (n) => { state.historyPage = n; refresh() }))
+  return c
+}
+
+// ── Global chat panel (floating right side) ───────────────────────────────────
+let _gcPollTimer = null
+
+function mountGlobalChat() {
+  document.getElementById('globalChat')?.remove()
+  if (!state.globalChat.open) return
+
+  const panel = el(`<div id="globalChat" class="gc-panel">
+    <div class="gc-head">
+      <span class="gc-title">Global Chat</span>
+      <button class="gc-close" id="gcClose">×</button>
+    </div>
+    <div class="gc-messages" id="gcMsgs"></div>
+    <div class="gc-input-row">
+      <input id="gcInput" placeholder="Say something..." maxlength="200" autocomplete="off" />
+      <button class="btn" id="gcSend">Send</button>
+    </div>
+  </div>`)
+
+  document.body.appendChild(panel)
+  panel.querySelector('#gcClose').onclick = () => { state.globalChat.open = false; render() }
+
+  const msgsEl = panel.querySelector('#gcMsgs')
+  const input = panel.querySelector('#gcInput')
+
+  function renderMessages() {
+    const atBottom = msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight < 60
+    msgsEl.innerHTML = ''
+    state.globalChat.messages.forEach((m) => {
+      const mine = state.user && m.username === state.user.username
+      const row = el(`<div class="gc-msg ${mine ? 'gc-mine' : ''}">
+        <span class="gc-who" data-uid="${m.user_id || ''}" data-uname="${m.username}">${m.username}</span>
+        <span class="gc-text">${escHtml(m.message)}</span>
+      </div>`)
+      row.querySelector('.gc-who').onclick = () => openDmWith(m.user_id, m.username)
+      msgsEl.appendChild(row)
+    })
+    if (atBottom || state.globalChat.messages.length <= 10) msgsEl.scrollTop = msgsEl.scrollHeight
+  }
+
+  async function pollChat() {
+    try {
+      const d = await api.get('/api/chat/global')
+      state.globalChat.messages = d.messages || []
+      renderMessages()
+    } catch {}
+    _gcPollTimer = setTimeout(pollChat, 3000)
+  }
+
+  const send = async () => {
+    const msg = input.value.trim()
+    if (!msg) return
+    input.value = ''
+    try {
+      await api.post('/api/chat/global', { message: msg })
+      await pollChat()
+    } catch (e) { toast(e.message, 'bad') }
+  }
+  panel.querySelector('#gcSend').onclick = send
+  input.onkeydown = (e) => { if (e.key === 'Enter') send() }
+
+  clearTimeout(_gcPollTimer)
+  pollChat()
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+}
+
+// Open a DM conversation with a user by their id+name
+async function openDmWith(userId, username) {
+  if (!state.user) { toast('Log in to send messages', 'bad'); return }
+  if (userId === state.user.id || username === state.user.username) return
+  // If we don't have userId, look it up
+  if (!userId) {
+    try { const r = await api.get(`/api/users/lookup?username=${encodeURIComponent(username)}`); userId = r.user.id } catch { toast('User not found', 'bad'); return }
+  }
+  state.dms.activeId = userId
+  state.dms.activeName = username
+  state.tab = 'messages'
+  refresh()
+}
+
+// ── Messages tab (DMs) ────────────────────────────────────────────────────────
+function messagesView() {
+  const c = el('<div class="dm-layout"></div>')
+
+  // Sidebar: conversation list
+  const sidebar = el('<div class="dm-sidebar"></div>')
+  const sideHead = el('<div class="dm-sidebar-head">Messages</div>')
+  sidebar.appendChild(sideHead)
+
+  if (!state.dms.conversations.length && !state.dms.activeId) {
+    sidebar.appendChild(el('<div class="empty" style="padding:20px 12px;font-size:13px">No conversations yet.<br>Click a username on any trade to start a DM.</div>'))
+  } else {
+    state.dms.conversations.forEach((conv) => {
+      const active = conv.partner_id === state.dms.activeId
+      const row = el(`<div class="dm-conv ${active ? 'dm-conv-active' : ''}">
+        <div class="dm-conv-name">${escHtml(conv.partner_name)}</div>
+        <div class="dm-conv-preview">${escHtml(conv.message || '')}</div>
+      </div>`)
+      row.onclick = () => { state.dms.activeId = conv.partner_id; state.dms.activeName = conv.partner_name; refresh() }
+      sidebar.appendChild(row)
+    })
+  }
+  c.appendChild(sidebar)
+
+  // Thread panel
+  const thread = el('<div class="dm-thread"></div>')
+  if (!state.dms.activeId) {
+    thread.appendChild(el('<div class="empty" style="margin-top:60px">Select a conversation or click a username to start chatting.</div>'))
+  } else {
+    const head = el(`<div class="dm-thread-head">${escHtml(state.dms.activeName)}</div>`)
+    thread.appendChild(head)
+
+    const msgs = el('<div class="dm-msgs" id="dmMsgs"></div>')
+    state.dms.messages.forEach((m) => {
+      const mine = m.from_id === state.user.id
+      msgs.appendChild(el(`<div class="dm-msg ${mine ? 'dm-mine' : ''}">
+        <div class="dm-bubble">${escHtml(m.message)}</div>
+        <div class="dm-ts">${new Date(m.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</div>
+      </div>`))
+    })
+    thread.appendChild(msgs)
+    setTimeout(() => { const el2 = document.getElementById('dmMsgs'); if (el2) el2.scrollTop = el2.scrollHeight }, 0)
+
+    const inputRow = el('<div class="dm-input-row"></div>')
+    const input = el('<input class="dm-input" placeholder="Type a message..." maxlength="500" autocomplete="off" />')
+    const sendBtn = el('<button class="btn">Send</button>')
+    const sendDm = async () => {
+      const msg = input.value.trim()
+      if (!msg) return
+      input.value = ''
+      try {
+        await api.post(`/api/chat/dms/${state.dms.activeId}`, { message: msg })
+        refresh()
+      } catch (e) { toast(e.message, 'bad') }
+    }
+    sendBtn.onclick = sendDm
+    input.onkeydown = (e) => { if (e.key === 'Enter') sendDm() }
+    inputRow.appendChild(input); inputRow.appendChild(sendBtn)
+    thread.appendChild(inputRow)
+  }
+  c.appendChild(thread)
   return c
 }
 

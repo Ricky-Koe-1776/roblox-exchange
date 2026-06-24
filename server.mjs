@@ -90,6 +90,8 @@ const db = {
   offers: [], // counter-offers against ads (see createOffer)
   trades: [], // completed/declined trade records (history)
   pendingWithdrawals: [], // pending bot fulfillment
+  chatMessages: [],       // global chat
+  dmMessages: [],         // private DMs
 }
 
 // Bot mailbox accounts per game (the Roblox account users gift items to).
@@ -507,6 +509,66 @@ const server = http.createServer(async (req, res) => {
       const totalPages = Math.max(1, Math.ceil(all.length / PAGE))
       const page = Math.min(Math.max(1, parseInt(url.searchParams.get('page')) || 1), totalPages)
       return send(res, 200, { trades: all.slice((page - 1) * PAGE, page * PAGE), page, totalPages })
+    }
+
+    // --- Global chat ---
+    if (path === '/api/chat/global' && method === 'GET') {
+      const u = sessionUser(req); if (!u) return send(res, 401, { error: 'Not logged in' })
+      return send(res, 200, { messages: db.chatMessages.slice(-50) })
+    }
+    if (path === '/api/chat/global' && method === 'POST') {
+      const u = sessionUser(req); if (!u) return send(res, 401, { error: 'Not logged in' })
+      const msg = (body.message || '').trim().slice(0, 200)
+      if (!msg) return send(res, 400, { error: 'Message cannot be empty' })
+      const cm = { id: crypto.randomUUID(), userId: u.id, username: u.username, message: msg, created_at: new Date().toISOString() }
+      db.chatMessages.push(cm)
+      if (db.chatMessages.length > 200) db.chatMessages.shift()
+      return send(res, 200, { ok: true, id: cm.id })
+    }
+
+    // --- DMs ---
+    if (path === '/api/chat/dms' && method === 'GET') {
+      const u = sessionUser(req); if (!u) return send(res, 401, { error: 'Not logged in' })
+      const partners = new Map()
+      for (const m of db.dmMessages) {
+        if (m.from_id !== u.id && m.to_id !== u.id) continue
+        const pid = m.from_id === u.id ? m.to_id : m.from_id
+        const pname = m.from_id === u.id ? m.to_name : m.from_name
+        if (!partners.has(pid) || new Date(m.created_at) > new Date(partners.get(pid).created_at))
+          partners.set(pid, { partner_id: pid, partner_name: pname, message: m.message, created_at: m.created_at, read: m.read, from_id: m.from_id })
+      }
+      const unread = db.dmMessages.filter((m) => m.to_id === u.id && !m.read).length
+      return send(res, 200, { conversations: [...partners.values()].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)), unreadTotal: unread })
+    }
+    if ((m = path.match(/^\/api\/chat\/dms\/([^/]+)$/)) && method === 'GET') {
+      const u = sessionUser(req); if (!u) return send(res, 401, { error: 'Not logged in' })
+      const otherId = m[1]
+      const msgs = db.dmMessages.filter((x) => (x.from_id === u.id && x.to_id === otherId) || (x.from_id === otherId && x.to_id === u.id))
+      msgs.forEach((x) => { if (x.to_id === u.id) x.read = true })
+      return send(res, 200, { messages: msgs })
+    }
+    if ((m = path.match(/^\/api\/chat\/dms\/([^/]+)$/)) && method === 'POST') {
+      const u = sessionUser(req); if (!u) return send(res, 401, { error: 'Not logged in' })
+      const otherId = m[1]
+      const msg = (body.message || '').trim().slice(0, 500)
+      if (!msg) return send(res, 400, { error: 'Message cannot be empty' })
+      const other = db.users.get(otherId)
+      if (!other) return send(res, 400, { error: 'User not found' })
+      const dm = { id: crypto.randomUUID(), from_id: u.id, from_name: u.username, to_id: other.id, to_name: other.username, message: msg, read: false, created_at: new Date().toISOString() }
+      db.dmMessages.push(dm)
+      return send(res, 200, { ok: true, id: dm.id })
+    }
+    if (path === '/api/chat/unread' && method === 'GET') {
+      const u = sessionUser(req); if (!u) return send(res, 401, { error: 'Not logged in' })
+      return send(res, 200, { unread: db.dmMessages.filter((m) => m.to_id === u.id && !m.read).length })
+    }
+    if (path === '/api/users/lookup' && method === 'GET') {
+      const u = sessionUser(req); if (!u) return send(res, 401, { error: 'Not logged in' })
+      const username = (url.searchParams.get('username') || '').toLowerCase()
+      const id = db.byName.get(username)
+      if (!id) return send(res, 404, { error: 'User not found' })
+      const other = db.users.get(id)
+      return send(res, 200, { user: { id: other.id, username: other.username } })
     }
 
     // --- Deposit info ---
