@@ -602,6 +602,17 @@ const server = http.createServer(async (req, res) => {
       const other = db.users.get(id)
       return send(res, 200, { user: { id: other.id, username: other.username } })
     }
+    if ((m = path.match(/^\/api\/users\/([^/]+)\/thumbsup$/)) && method === 'POST') {
+      const u = sessionUser(req); if (!u) return send(res, 401, { error: 'Not logged in' })
+      const tid = db.byName.get(m[1].toLowerCase())
+      if (!tid) return send(res, 404, { error: 'User not found' })
+      if (tid === u.id) return send(res, 400, { error: "Can't thumb-up yourself" })
+      if (!db.reputation) db.reputation = new Set()
+      const key = `${u.id}:${tid}`
+      if (!db.reputation.has(key)) db.reputation.add(key)
+      const thumbsUp = [...db.reputation].filter((k) => k.endsWith(`:${tid}`)).length
+      return send(res, 200, { ok: true, thumbsUp, hasThumbedUp: true })
+    }
     if (path === '/api/users/profile' && method === 'GET') {
       const u = sessionUser(req); if (!u) return send(res, 401, { error: 'Not logged in' })
       const username = (url.searchParams.get('username') || '').toLowerCase()
@@ -614,7 +625,10 @@ const server = http.createServer(async (req, res) => {
       const inv = db.inventories.get(id)?.get(game)
       const inventory = inv ? [...inv.entries()].filter(([, q]) => q > 0).map(([item, qty]) => ({ item, qty, rarity: '' })) : []
       const completedTrades = db.trades.filter((t) => (t.seller === other.username || t.buyer === other.username) && t.game === game).length
-      return send(res, 200, { username: other.username, stats: { completedTrades }, ads, inventory })
+      if (!db.reputation) db.reputation = new Set()
+      const thumbsUp = [...db.reputation].filter((k) => k.endsWith(`:${id}`)).length
+      const hasThumbedUp = db.reputation.has(`${u.id}:${id}`)
+      return send(res, 200, { username: other.username, targetId: id, stats: { completedTrades, thumbsUp, hasThumbedUp }, ads, inventory })
     }
 
     // --- Deposit info ---

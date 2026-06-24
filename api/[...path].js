@@ -166,6 +166,12 @@ async function ensureInit() {
       read       BOOLEAN NOT NULL DEFAULT false,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`
+  await sql`
+    CREATE TABLE IF NOT EXISTS rex_reputation (
+      from_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      to_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      PRIMARY KEY (from_id, to_id)
+    )`
   // Make ad_id nullable for direct offers (idempotent)
   await sql`ALTER TABLE rex_trade_offers ALTER COLUMN ad_id DROP NOT NULL`.catch(() => {})
   _initDone = true
@@ -613,20 +619,31 @@ export default async function handler(req, res) {
       if (!row) return res.status(404) && json({ error: 'User not found' })
       return json({ user: row })
     }
+    if ((m = path.match(/^\/users\/([^/]+)\/thumbsup$/)) && method === 'POST') {
+      const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
+      const target = (await sql`SELECT id FROM users WHERE LOWER(roblox_username)=LOWER(${m[1]})`)[0]
+      if (!target) return res.status(404) && json({ error: 'User not found' })
+      if (target.id === u.id) return res.status(400) && json({ error: "Can't thumb-up yourself" })
+      await sql`INSERT INTO rex_reputation (from_id, to_id) VALUES (${u.id}, ${target.id}) ON CONFLICT DO NOTHING`
+      const count = (await sql`SELECT COUNT(*) FROM rex_reputation WHERE to_id=${target.id}`)[0].count
+      return json({ ok: true, thumbsUp: Number(count), hasThumbedUp: true })
+    }
     if (path === '/users/profile' && method === 'GET') {
       const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
       const username = (url.searchParams.get('username') || '').trim()
       const game = url.searchParams.get('game') || 'growagarden'
       const row = (await sql`SELECT id, roblox_username FROM users WHERE LOWER(roblox_username)=LOWER(${username})`)[0]
       if (!row) return res.status(404) && json({ error: 'User not found' })
-      const [adsRows, invRows, countRow] = await Promise.all([
+      const [adsRows, invRows, countRow, repRow, myVote] = await Promise.all([
         sql`SELECT * FROM rex_trade_ads WHERE user_id=${row.id} AND game=${game} AND status='open' ORDER BY created_at DESC LIMIT 20`,
         sql`SELECT item, qty FROM rex_inventories WHERE user_id=${row.id} AND game=${game} AND qty > 0 ORDER BY item`,
         sql`SELECT COUNT(*) FROM rex_trade_ads WHERE game=${game} AND status='completed' AND (user_id=${row.id} OR buyer_id=${row.id})`,
+        sql`SELECT COUNT(*) FROM rex_reputation WHERE to_id=${row.id}`,
+        sql`SELECT 1 FROM rex_reputation WHERE from_id=${u.id} AND to_id=${row.id}`,
       ])
       const ads = adsRows.map((a) => ({ id: a.id, username: a.username, note: a.note, offering: a.offering, requesting: a.requesting, mine: a.user_id === u.id }))
       const inventory = invRows.map((r) => ({ item: r.item, qty: r.qty, rarity: '' }))
-      return json({ username: row.roblox_username, stats: { completedTrades: Number(countRow[0].count) }, ads, inventory })
+      return json({ username: row.roblox_username, targetId: row.id, stats: { completedTrades: Number(countRow[0].count), thumbsUp: Number(repRow[0].count), hasThumbedUp: myVote.length > 0 }, ads, inventory })
     }
 
     // --- Deposit info ---

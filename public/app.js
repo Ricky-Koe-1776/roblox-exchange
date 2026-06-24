@@ -929,21 +929,33 @@ function playersView() {
   if (p.loading) { wrap.appendChild(el('<div class="empty" style="margin-top:40px">Loading…</div>')); return wrap }
   if (p.error) { wrap.appendChild(el(`<div class="empty" style="margin-top:40px">User not found.</div>`)); return wrap }
 
-  // Profile header
+  const isOther = state.user && state.user.username !== p.username
+  const voted = p.stats?.hasThumbedUp
   const head = el(`<div class="profile-head">
     <div class="profile-name">${escHtml(p.username)}</div>
     <div class="profile-stats">
       <div class="profile-stat"><div class="profile-stat-val">${p.stats?.completedTrades ?? 0}</div><div class="profile-stat-label">Trades Completed</div></div>
+      <div class="profile-stat"><div class="profile-stat-val">${p.stats?.thumbsUp ?? 0}</div><div class="profile-stat-label">Thumbs Up</div></div>
       <div class="profile-stat"><div class="profile-stat-val">${p.ads?.length ?? 0}</div><div class="profile-stat-label">Active Listings</div></div>
       <div class="profile-stat"><div class="profile-stat-val">${p.inventory?.length ?? 0}</div><div class="profile-stat-label">Items Held</div></div>
     </div>
-    ${state.user && state.user.username !== p.username ? `<div class="profile-actions">
-      <button class="btn" id="profOffer">🤝 Make Offer</button>
-      <button class="btn ghost" id="profDm">💬 DM</button>
+    ${isOther ? `<div class="profile-actions">
+      <button class="btn" id="profOffer">Trade</button>
+      <button class="btn ghost" id="profDm">Message</button>
+      <button class="btn ghost ${voted ? 'thumb-voted' : ''}" id="profThumb">${voted ? 'Thumbs Up (given)' : 'Thumbs Up'}</button>
     </div>` : ''}
   </div>`)
   head.querySelector('#profOffer')?.addEventListener('click', () => openDirectOffer(p.username))
   head.querySelector('#profDm')?.addEventListener('click', () => openDmWith(null, p.username))
+  head.querySelector('#profThumb')?.addEventListener('click', async () => {
+    if (voted) return
+    try {
+      const d = await api.post(`/api/users/${encodeURIComponent(p.username)}/thumbsup`, {})
+      state.profileUser.stats.thumbsUp = d.thumbsUp
+      state.profileUser.stats.hasThumbedUp = true
+      render()
+    } catch (e) { toast(e.message, 'bad') }
+  })
   wrap.appendChild(head)
 
   // Active trades
