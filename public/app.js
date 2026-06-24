@@ -317,6 +317,7 @@ function render() {
   )
   app.appendChild(wrap)
   if (state.user) mountGlobalChat()
+  document.body.classList.toggle('chat-open', !!(state.user && state.globalChat.open))
 }
 
 function header() {
@@ -836,13 +837,12 @@ function mountGlobalChat() {
 
   const panel = el(`<div id="globalChat" class="gc-panel">
     <div class="gc-head">
-      <span class="gc-title">Global Chat</span>
-      <button class="gc-close" id="gcClose">×</button>
+      <span class="gc-title">💬 Global Chat</span>
+      <button class="gc-close" id="gcClose">✕</button>
     </div>
     <div class="gc-messages" id="gcMsgs"></div>
     <div class="gc-input-row">
       <input id="gcInput" placeholder="Say something..." maxlength="200" autocomplete="off" />
-      <button class="btn" id="gcSend">Send</button>
     </div>
   </div>`)
 
@@ -885,7 +885,6 @@ function mountGlobalChat() {
       await pollChat()
     } catch (e) { toast(e.message, 'bad') }
   }
-  panel.querySelector('#gcSend').onclick = send
   input.onkeydown = (e) => { if (e.key === 'Enter') send() }
 
   clearTimeout(_gcPollTimer)
