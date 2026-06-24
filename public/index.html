@@ -205,8 +205,10 @@
     .profile-ads { display: flex; flex-direction: column; gap: 12px; }
 
     /* User popover */
-    .user-pop { position: absolute; z-index: 200; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 6px; display: flex; flex-direction: column; gap: 4px; box-shadow: 0 8px 24px rgba(0,0,0,.4); min-width: 150px; }
-    .user-pop-btn { background: none; border: none; color: var(--text); font-family: inherit; font-size: 14px; padding: 8px 12px; text-align: left; cursor: pointer; border-radius: 7px; }
+    .user-pop-backdrop { position: fixed; inset: 0; z-index: 300; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.5); }
+    .user-pop { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 8px; display: flex; flex-direction: column; gap: 4px; box-shadow: 0 16px 48px rgba(0,0,0,.6); min-width: 220px; }
+    .user-pop-name { font-size: 15px; font-weight: 700; padding: 10px 14px 6px; color: var(--text); border-bottom: 1px solid var(--line); margin-bottom: 4px; }
+    .user-pop-btn { background: none; border: none; color: var(--text); font-family: inherit; font-size: 15px; padding: 11px 14px; text-align: left; cursor: pointer; border-radius: 8px; }
     .user-pop-btn:hover { background: var(--panel-2); }
 
     /* Global chat — full-height right sidebar */

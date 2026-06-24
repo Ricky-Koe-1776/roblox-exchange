@@ -1000,19 +1000,19 @@ function escHtml(s) {
 function userPopover(e, username) {
   e.stopPropagation()
   document.getElementById('userPopover')?.remove()
-  const pop = el(`<div id="userPopover" class="user-pop">
-    <button class="user-pop-btn" id="upProfile">👤 View Profile</button>
-    <button class="user-pop-btn" id="upOffer">🤝 Make Offer</button>
-    <button class="user-pop-btn" id="upDm">💬 Send DM</button>
+  const pop = el(`<div id="userPopoverBackdrop" class="user-pop-backdrop">
+    <div id="userPopover" class="user-pop">
+      <div class="user-pop-name">${escHtml(username)}</div>
+      <button class="user-pop-btn" id="upProfile">View Profile</button>
+      <button class="user-pop-btn" id="upOffer">Make Offer</button>
+      <button class="user-pop-btn" id="upDm">Send DM</button>
+    </div>
   </div>`)
-  pop.style.top = (e.clientY + window.scrollY + 4) + 'px'
-  pop.style.left = (e.clientX + window.scrollX) + 'px'
   document.body.appendChild(pop)
   pop.querySelector('#upProfile').onclick = () => { pop.remove(); openProfile(username) }
   pop.querySelector('#upOffer').onclick = () => { pop.remove(); openDirectOffer(username) }
   pop.querySelector('#upDm').onclick = () => { pop.remove(); openDmWith(null, username) }
-  const dismiss = () => { pop.remove(); document.removeEventListener('click', dismiss) }
-  setTimeout(() => document.addEventListener('click', dismiss), 0)
+  pop.addEventListener('click', (ev) => { if (ev.target === pop) pop.remove() })
 }
 
 async function openDirectOffer(username) {
