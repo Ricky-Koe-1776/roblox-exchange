@@ -242,7 +242,7 @@ function setCookie(name, value, maxAge) {
 async function sessionUser(req) {
   const sid = parseCookies(req.headers.cookie || '').rex_sid
   if (!sid) return null
-  const rows = await sql`SELECT u.id, u.username, u.role FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id=${sid}`
+  const rows = await sql`SELECT u.id, u.username, u.role, u.roblox_id FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id=${sid}`
   return rows[0] || null
 }
 
