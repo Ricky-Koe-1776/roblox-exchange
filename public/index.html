@@ -179,6 +179,11 @@
     /* Clickable username */
     .dm-link { cursor: pointer; }
     .dm-link:hover { text-decoration: underline; color: var(--accent); }
+    /* User popover */
+    .user-pop { position: absolute; z-index: 200; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 6px; display: flex; flex-direction: column; gap: 4px; box-shadow: 0 8px 24px rgba(0,0,0,.4); min-width: 150px; }
+    .user-pop-btn { background: none; border: none; color: var(--text); font-family: inherit; font-size: 14px; padding: 8px 12px; text-align: left; cursor: pointer; border-radius: 7px; }
+    .user-pop-btn:hover { background: var(--panel-2); }
+
     /* Global chat — full-height right sidebar */
     .gc-panel { position: fixed; top: 61px; right: 0; bottom: 0; width: 280px; background: var(--panel); border-left: 1px solid var(--line); display: flex; flex-direction: column; z-index: 30; }
     .gc-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border-bottom: 1px solid var(--line); flex-shrink: 0; }

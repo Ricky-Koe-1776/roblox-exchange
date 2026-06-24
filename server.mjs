@@ -296,28 +296,54 @@ function createOffer(fromId, adId, offerItems, requestItems) {
 function releaseOfferEscrow(offer) {
   for (const o of offer.offerItems) addItem(offer.fromId, offer.game, o.item, o.qty)
 }
+function createDirectOffer(fromId, toUsername, game, offerItems, requestItems) {
+  const toUser = [...db.users.values()].find((u) => u.username.toLowerCase() === toUsername.toLowerCase())
+  if (!toUser) throw new Error(`User ${toUsername} not found`)
+  if (toUser.id === fromId) throw new Error("You can't send an offer to yourself")
+  if (!offerItems.length) throw new Error('Add at least one item to your offer')
+  if (!requestItems.length) throw new Error('Pick at least one item you want')
+  for (const o of offerItems) {
+    if (!validItem(game, o.item)) throw new Error(`Unknown item: ${o.item}`)
+    if (invQty(fromId, game, o.item) < o.qty) throw new Error(`You don't have ${o.qty}x ${o.item}`)
+  }
+  for (const r of requestItems) {
+    if (!validItem(game, r.item)) throw new Error(`Unknown item: ${r.item}`)
+    if (invQty(toUser.id, game, r.item) < r.qty) throw new Error(`${toUsername} doesn't have ${r.qty}x ${r.item}`)
+  }
+  for (const o of offerItems) removeItem(fromId, game, o.item, o.qty)
+  const offer = {
+    id: crypto.randomUUID(), adId: null, game,
+    fromId, fromName: db.users.get(fromId).username,
+    toId: toUser.id, toName: toUser.username,
+    offerItems, requestItems,
+    status: 'pending', createdAt: Date.now(),
+  }
+  db.offers.unshift(offer)
+  return offer
+}
 function acceptOffer(offerId, byId) {
   const offer = db.offers.find((o) => o.id === offerId)
   if (!offer) throw new Error('Offer not found')
-  if (offer.toId !== byId) throw new Error('Only the ad owner can accept this offer')
+  if (offer.toId !== byId) throw new Error('Only the recipient can accept this offer')
   if (offer.status !== 'pending') throw new Error('Offer is no longer pending')
-  // Ad owner must still own every requested item.
   for (const r of offer.requestItems) {
     if (invQty(offer.toId, offer.game, r.item) < r.qty) throw new Error(`You no longer have ${r.qty}x ${r.item}`)
   }
   for (const r of offer.requestItems) removeItem(offer.toId, offer.game, r.item, r.qty)
-  for (const r of offer.requestItems) addItem(offer.fromId, offer.game, r.item, r.qty) // -> sender
-  for (const o of offer.offerItems) addItem(offer.toId, offer.game, o.item, o.qty)     // escrow -> owner
+  for (const r of offer.requestItems) addItem(offer.fromId, offer.game, r.item, r.qty)
+  for (const o of offer.offerItems) addItem(offer.toId, offer.game, o.item, o.qty)
   offer.status = 'accepted'
-  // Close the ad and release its original escrow back to the owner.
-  const ad = db.ads.find((a) => a.id === offer.adId)
-  if (ad && ad.status === 'open') {
-    for (const o of ad.offering) addItem(ad.userId, ad.game, o.item, o.qty)
-    ad.status = 'completed'; ad.completedAt = Date.now()
-  }
-  // Decline sibling offers on the same ad and release their escrow.
-  for (const sib of db.offers.filter((o) => o.adId === offer.adId && o.status === 'pending' && o.id !== offer.id)) {
-    releaseOfferEscrow(sib); sib.status = 'declined'
+  if (offer.adId) {
+    // Close the ad and release its original escrow back to the owner.
+    const ad = db.ads.find((a) => a.id === offer.adId)
+    if (ad && ad.status === 'open') {
+      for (const o of ad.offering) addItem(ad.userId, ad.game, o.item, o.qty)
+      ad.status = 'completed'; ad.completedAt = Date.now()
+    }
+    // Decline sibling offers on the same ad and release their escrow.
+    for (const sib of db.offers.filter((o) => o.adId === offer.adId && o.status === 'pending' && o.id !== offer.id)) {
+      releaseOfferEscrow(sib); sib.status = 'declined'
+    }
   }
   db.trades.unshift({
     id: offer.id, game: offer.game, seller: offer.toName, buyer: offer.fromName,
@@ -476,6 +502,12 @@ const server = http.createServer(async (req, res) => {
       if (!u) return send(res, 401, { error: 'Not logged in' })
       const offer = createOffer(u.id, m[1], body.offerItems || [], body.requestItems || [])
       return send(res, 200, { offer })
+    }
+    if (path === '/api/offers/direct' && method === 'POST') {
+      const u = sessionUser(req)
+      if (!u) return send(res, 401, { error: 'Not logged in' })
+      const offer = createDirectOffer(u.id, body.toUsername, body.game || 'growagarden', body.offerItems || [], body.requestItems || [])
+      return send(res, 200, { ok: true, id: offer.id })
     }
     if (path === '/api/offers' && method === 'GET') {
       const u = sessionUser(req)

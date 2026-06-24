@@ -428,7 +428,7 @@ function adCard(ad) {
       <div class="side"><div class="label">Requesting</div><div class="items">${ad.requesting.map(entryPill).join('')}</div></div>
     </div>
   </div>`)
-  if (!ad.mine) ad_el.querySelector('.dm-link').onclick = () => openDmWith(null, ad.username)
+  if (!ad.mine) ad_el.querySelector('.dm-link').onclick = (e) => userPopover(e, ad.username)
   const actions = ad_el.querySelector('.ad-actions')
   const view = el('<button class="btn ghost">View</button>')
   view.onclick = () => viewTrade(ad)
@@ -686,7 +686,11 @@ function tradeView() {
 
   async function send() {
     try {
-      await api.post(`/api/ads/${ad.id}/offer`, { offerItems: tb.offer, requestItems: tb.request })
+      if (ad.direct) {
+        await api.post('/api/offers/direct', { toUsername: ad.username, game: state.game, offerItems: tb.offer, requestItems: tb.request })
+      } else {
+        await api.post(`/api/ads/${ad.id}/offer`, { offerItems: tb.offer, requestItems: tb.request })
+      }
       toast('Offer sent!'); back()
     } catch (e) { toast(e.message, 'bad') }
   }
@@ -890,6 +894,39 @@ function mountGlobalChat() {
 
 function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+}
+
+function userPopover(e, username) {
+  e.stopPropagation()
+  document.getElementById('userPopover')?.remove()
+  const pop = el(`<div id="userPopover" class="user-pop">
+    <button class="user-pop-btn" id="upDm">💬 Send DM</button>
+    <button class="user-pop-btn" id="upOffer">🤝 Make Offer</button>
+  </div>`)
+  // position near the click
+  pop.style.top = (e.clientY + window.scrollY + 4) + 'px'
+  pop.style.left = (e.clientX + window.scrollX) + 'px'
+  document.body.appendChild(pop)
+  pop.querySelector('#upDm').onclick = () => { pop.remove(); openDmWith(null, username) }
+  pop.querySelector('#upOffer').onclick = () => { pop.remove(); openDirectOffer(username) }
+  const dismiss = () => { pop.remove(); document.removeEventListener('click', dismiss) }
+  setTimeout(() => document.addEventListener('click', dismiss), 0)
+}
+
+async function openDirectOffer(username) {
+  if (!state.user) { toast('Log in to send offers', 'bad'); return }
+  state.tradeAd = { username, id: null, direct: true }
+  state.tradeBuilder = { offer: [], request: [] }
+  state.tab = 'trade'
+  try {
+    const [mine, theirs] = await Promise.all([
+      api.get(`/api/inventory?game=${state.game}`),
+      api.get(`/api/inventory?game=${state.game}&user=${encodeURIComponent(username)}`),
+    ])
+    state.myInv = mine.items || []
+    state.theirInv = theirs.items || []
+  } catch (e) { toast(e.message, 'bad') }
+  render()
 }
 
 // Open a DM conversation with a user by their id+name

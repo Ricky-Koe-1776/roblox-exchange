@@ -126,7 +126,7 @@ async function ensureInit() {
   await sql`
     CREATE TABLE IF NOT EXISTS rex_trade_offers (
       id            TEXT PRIMARY KEY,
-      ad_id         TEXT NOT NULL,
+      ad_id         TEXT,
       game          TEXT NOT NULL,
       from_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       from_name     TEXT NOT NULL,
@@ -166,6 +166,8 @@ async function ensureInit() {
       read       BOOLEAN NOT NULL DEFAULT false,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`
+  // Make ad_id nullable for direct offers (idempotent)
+  await sql`ALTER TABLE rex_trade_offers ALTER COLUMN ad_id DROP NOT NULL`.catch(() => {})
   _initDone = true
 }
 
@@ -322,10 +324,36 @@ async function createOffer(fromId, fromName, adId, offerItems, requestItems) {
     VALUES (${id},${adId},${ad.game},${fromId},${fromName},${ad.user_id},${ad.username},${JSON.stringify(offerItems)},${JSON.stringify(requestItems)})`
   return id
 }
+async function createDirectOffer(fromId, fromName, toUsername, game, offerItems, requestItems) {
+  const toUser = (await sql`SELECT * FROM users WHERE LOWER(roblox_username)=LOWER(${toUsername})`)[0]
+  if (!toUser) throw new Error(`User ${toUsername} not found`)
+  if (toUser.id === fromId) throw new Error("You can't send an offer to yourself")
+  if (!offerItems.length) throw new Error('Add at least one item to your offer')
+  if (!requestItems.length) throw new Error('Pick at least one item you want')
+  for (const o of [...offerItems, ...requestItems]) {
+    if (o.tag) throw new Error('Offers must be specific items')
+    if (!validItem(game, o.item)) throw new Error(`Unknown item: ${o.item}`)
+    if (!(o.qty > 0)) throw new Error('Quantity must be positive')
+  }
+  for (const r of requestItems) {
+    if (await invQty(toUser.id, game, r.item) < r.qty) throw new Error(`${toUsername} doesn't have ${r.qty}x ${r.item}`)
+  }
+  const reserved = []
+  for (const o of offerItems) {
+    const ok = await removeItem(fromId, game, o.item, o.qty)
+    if (!ok) { for (const x of reserved) await addItem(fromId, game, x.item, x.qty); throw new Error(`You don't have ${o.qty}x ${o.item}`) }
+    reserved.push(o)
+  }
+  const id = crypto.randomUUID()
+  await sql`
+    INSERT INTO rex_trade_offers (id, ad_id, game, from_id, from_name, to_id, to_name, offer_items, request_items)
+    VALUES (${id},${null},${game},${fromId},${fromName},${toUser.id},${toUser.roblox_username},${JSON.stringify(offerItems)},${JSON.stringify(requestItems)})`
+  return id
+}
 async function acceptOffer(offerId, byId) {
   const o = (await sql`SELECT * FROM rex_trade_offers WHERE id=${offerId}`)[0]
   if (!o) throw new Error('Offer not found')
-  if (o.to_id !== byId) throw new Error('Only the ad owner can accept this offer')
+  if (o.to_id !== byId) throw new Error('Only the recipient can accept this offer')
   if (o.status !== 'pending') throw new Error('Offer is no longer pending')
   for (const r of o.request_items) {
     if (await invQty(o.to_id, o.game, r.item) < r.qty) throw new Error(`You no longer have ${r.qty}x ${r.item}`)
@@ -334,15 +362,17 @@ async function acceptOffer(offerId, byId) {
   for (const r of o.request_items) await addItem(o.from_id, o.game, r.item, r.qty)
   for (const it of o.offer_items) await addItem(o.to_id, o.game, it.item, it.qty)
   await sql`UPDATE rex_trade_offers SET status='accepted' WHERE id=${offerId}`
-  // Close the ad, release its original escrow back to the owner.
-  const ad = (await sql`SELECT * FROM rex_trade_ads WHERE id=${o.ad_id}`)[0]
-  if (ad && ad.status === 'open') {
-    for (const it of ad.offering) await addItem(ad.user_id, ad.game, it.item, it.qty)
-    await sql`UPDATE rex_trade_ads SET status='completed', buyer_id=${o.from_id}, buyer_name=${o.from_name}, completed_at=NOW() WHERE id=${o.ad_id}`
+  if (o.ad_id) {
+    // Close the tied ad and release its escrow.
+    const ad = (await sql`SELECT * FROM rex_trade_ads WHERE id=${o.ad_id}`)[0]
+    if (ad && ad.status === 'open') {
+      for (const it of ad.offering) await addItem(ad.user_id, ad.game, it.item, it.qty)
+      await sql`UPDATE rex_trade_ads SET status='completed', buyer_id=${o.from_id}, buyer_name=${o.from_name}, completed_at=NOW() WHERE id=${o.ad_id}`
+    }
+    // Decline sibling offers and release their escrow.
+    const sibs = await sql`SELECT * FROM rex_trade_offers WHERE ad_id=${o.ad_id} AND status='pending' AND id != ${offerId}`
+    for (const s of sibs) { for (const it of s.offer_items) await addItem(s.from_id, s.game, it.item, it.qty); await sql`UPDATE rex_trade_offers SET status='declined' WHERE id=${s.id}` }
   }
-  // Decline sibling offers and release their escrow.
-  const sibs = await sql`SELECT * FROM rex_trade_offers WHERE ad_id=${o.ad_id} AND status='pending' AND id != ${offerId}`
-  for (const s of sibs) { for (const it of s.offer_items) await addItem(s.from_id, s.game, it.item, it.qty); await sql`UPDATE rex_trade_offers SET status='declined' WHERE id=${s.id}` }
 }
 async function setOfferStatus(offerId, userId, action) {
   const o = (await sql`SELECT * FROM rex_trade_offers WHERE id=${offerId}`)[0]
@@ -464,6 +494,12 @@ export default async function handler(req, res) {
     if ((m = path.match(/^\/ads\/([^/]+)\/offer$/)) && method === 'POST') {
       const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
       const id = await createOffer(u.id, u.username, m[1], req.body?.offerItems || [], req.body?.requestItems || [])
+      return json({ ok: true, id })
+    }
+    if (path === '/offers/direct' && method === 'POST') {
+      const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
+      const { toUsername, offerItems, requestItems, game } = req.body || {}
+      const id = await createDirectOffer(u.id, u.username, toUsername, game || 'growagarden', offerItems || [], requestItems || [])
       return json({ ok: true, id })
     }
     if (path === '/offers' && method === 'GET') {
