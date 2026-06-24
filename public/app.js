@@ -305,10 +305,12 @@ function render() {
 
 function header() {
   const h = el(`<header><div class="wrap"><div class="nav">
-    <div class="logo">Roblox<span>Exchange</span></div>
-    <select class="game-select" id="gameSel"></select>
-    <div class="spacer"></div>
-    <div id="userArea"></div>
+    <div class="nav-left">
+      <div class="logo">Roblox<span>Exchange</span></div>
+      <select class="game-select" id="gameSel"></select>
+    </div>
+    <div class="nav-center" id="navCenter"></div>
+    <div class="nav-right" id="userArea"></div>
   </div></div></header>`)
   const sel = h.querySelector('#gameSel')
   state.games.forEach((g) => {
@@ -317,15 +319,16 @@ function header() {
   })
   sel.onchange = () => { state.game = sel.value; state.builder = { offering: [], requesting: [] }; refresh() }
   const ua = h.querySelector('#userArea')
+  const center = h.querySelector('#navCenter')
   if (state.user) {
-    ua.innerHTML = `<span class="who">Signed in as <b>${state.user.username}</b></span>`
-    const dep = el('<button class="btn ghost" style="margin-left:12px">Deposit</button>')
+    const dep = el('<button class="btn ghost">Deposit</button>')
     dep.onclick = () => depositModal()
-    ua.appendChild(dep)
+    center.appendChild(dep)
     const wd = el('<button class="btn" style="margin-left:8px">Withdraw</button>')
     wd.onclick = () => withdrawModal()
-    ua.appendChild(wd)
-    const btn = el('<button class="btn ghost" style="margin-left:8px">Logout</button>')
+    center.appendChild(wd)
+    ua.innerHTML = `<span class="who">Signed in as <b>${state.user.username}</b></span>`
+    const btn = el('<button class="btn ghost" style="margin-left:12px">Logout</button>')
     btn.onclick = async () => { await api.post('/api/logout'); state.user = null; render() }
     ua.appendChild(btn)
   }
