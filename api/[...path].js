@@ -650,7 +650,7 @@ export default async function handler(req, res) {
       const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
       const username = (url.searchParams.get('username') || '').trim()
       const game = url.searchParams.get('game') || 'growagarden'
-      const row = (await sql`SELECT id, roblox_username FROM users WHERE LOWER(roblox_username)=LOWER(${username})`)[0]
+      const row = (await sql`SELECT id, roblox_username, roblox_id FROM users WHERE LOWER(roblox_username)=LOWER(${username})`)[0]
       if (!row) return res.status(404) && json({ error: 'User not found' })
       const [adsRows, invRows, countRow, repRow, myVote] = await Promise.all([
         sql`SELECT * FROM rex_trade_ads WHERE user_id=${row.id} AND game=${game} AND status='open' ORDER BY created_at DESC LIMIT 20`,
