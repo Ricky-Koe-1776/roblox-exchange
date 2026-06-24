@@ -95,7 +95,7 @@ async function ensureInit() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`
   await sql`
-    CREATE TABLE IF NOT EXISTS inventories (
+    CREATE TABLE IF NOT EXISTS rex_inventories (
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       game    TEXT NOT NULL,
       item    TEXT NOT NULL,
@@ -103,13 +103,13 @@ async function ensureInit() {
       PRIMARY KEY (user_id, game, item)
     )`
   await sql`
-    CREATE TABLE IF NOT EXISTS roblox_challenges (
+    CREATE TABLE IF NOT EXISTS rex_challenges (
       roblox_username TEXT PRIMARY KEY,
       phrase          TEXT NOT NULL,
       expires_at      TIMESTAMPTZ NOT NULL
     )`
   await sql`
-    CREATE TABLE IF NOT EXISTS trade_ads (
+    CREATE TABLE IF NOT EXISTS rex_trade_ads (
       id           TEXT PRIMARY KEY,
       game         TEXT NOT NULL,
       user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -124,7 +124,7 @@ async function ensureInit() {
       completed_at TIMESTAMPTZ
     )`
   await sql`
-    CREATE TABLE IF NOT EXISTS trade_offers (
+    CREATE TABLE IF NOT EXISTS rex_trade_offers (
       id            TEXT PRIMARY KEY,
       ad_id         TEXT NOT NULL,
       game          TEXT NOT NULL,
@@ -138,7 +138,7 @@ async function ensureInit() {
       created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`
   await sql`
-    CREATE TABLE IF NOT EXISTS pending_withdrawals (
+    CREATE TABLE IF NOT EXISTS rex_pending_withdrawals (
       id         TEXT PRIMARY KEY,
       game       TEXT NOT NULL,
       user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -156,25 +156,25 @@ const MAILBOX = {
 
 // ── Inventory primitives (the gifting bot will reuse addItem/removeItem) ───────
 async function invQty(userId, game, item) {
-  const r = await sql`SELECT qty FROM inventories WHERE user_id=${userId} AND game=${game} AND item=${item}`
+  const r = await sql`SELECT qty FROM rex_inventories WHERE user_id=${userId} AND game=${game} AND item=${item}`
   return r[0]?.qty || 0
 }
 async function addItem(userId, game, item, qty) {
   await sql`
-    INSERT INTO inventories (user_id, game, item, qty) VALUES (${userId},${game},${item},${qty})
-    ON CONFLICT (user_id, game, item) DO UPDATE SET qty = inventories.qty + ${qty}`
+    INSERT INTO rex_inventories (user_id, game, item, qty) VALUES (${userId},${game},${item},${qty})
+    ON CONFLICT (user_id, game, item) DO UPDATE SET qty = rex_inventories.qty + ${qty}`
 }
 async function removeItem(userId, game, item, qty) {
   const r = await sql`
-    UPDATE inventories SET qty = qty - ${qty}
+    UPDATE rex_inventories SET qty = qty - ${qty}
     WHERE user_id=${userId} AND game=${game} AND item=${item} AND qty >= ${qty}
     RETURNING qty`
   if (!r.length) return false
-  if (r[0].qty === 0) await sql`DELETE FROM inventories WHERE user_id=${userId} AND game=${game} AND item=${item} AND qty=0`
+  if (r[0].qty === 0) await sql`DELETE FROM rex_inventories WHERE user_id=${userId} AND game=${game} AND item=${item} AND qty=0`
   return true
 }
 async function invList(userId, game) {
-  const rows = await sql`SELECT item, qty FROM inventories WHERE user_id=${userId} AND game=${game} ORDER BY qty DESC`
+  const rows = await sql`SELECT item, qty FROM rex_inventories WHERE user_id=${userId} AND game=${game} ORDER BY qty DESC`
   return rows.map((r) => ({ item: r.item, qty: r.qty, value: itemValue(game, r.item), rarity: catalogItem(game, r.item)?.rarity || 'Unknown' }))
 }
 
@@ -236,12 +236,12 @@ async function createAd(userId, username, game, offering, requesting, note) {
   }
   const id = crypto.randomUUID()
   await sql`
-    INSERT INTO trade_ads (id, game, user_id, username, offering, requesting, note)
+    INSERT INTO rex_trade_ads (id, game, user_id, username, offering, requesting, note)
     VALUES (${id},${game},${userId},${username},${JSON.stringify(offering)},${JSON.stringify(requesting)},${(note || '').slice(0,140)})`
   return id
 }
 async function acceptAd(adId, buyer) {
-  const rows = await sql`SELECT * FROM trade_ads WHERE id=${adId}`
+  const rows = await sql`SELECT * FROM rex_trade_ads WHERE id=${adId}`
   const ad = rows[0]
   if (!ad) throw new Error('Ad not found')
   if (ad.status !== 'open') throw new Error('Ad is no longer open')
@@ -258,16 +258,16 @@ async function acceptAd(adId, buyer) {
   }
   for (const r of requesting) await addItem(ad.user_id, ad.game, r.item, r.qty)
   for (const o of offering) await addItem(buyer.id, ad.game, o.item, o.qty)
-  await sql`UPDATE trade_ads SET status='completed', buyer_id=${buyer.id}, buyer_name=${buyer.username}, completed_at=NOW() WHERE id=${adId}`
+  await sql`UPDATE rex_trade_ads SET status='completed', buyer_id=${buyer.id}, buyer_name=${buyer.username}, completed_at=NOW() WHERE id=${adId}`
 }
 async function cancelAd(adId, userId) {
-  const rows = await sql`SELECT * FROM trade_ads WHERE id=${adId}`
+  const rows = await sql`SELECT * FROM rex_trade_ads WHERE id=${adId}`
   const ad = rows[0]
   if (!ad) throw new Error('Ad not found')
   if (ad.user_id !== userId) throw new Error('Not your ad')
   if (ad.status !== 'open') throw new Error('Ad is no longer open')
   for (const o of ad.offering) await addItem(userId, ad.game, o.item, o.qty)
-  await sql`UPDATE trade_ads SET status='cancelled' WHERE id=${adId}`
+  await sql`UPDATE rex_trade_ads SET status='cancelled' WHERE id=${adId}`
 }
 
 // ── Counter-offers (Roblox-style trade builder) ───────────────────────────────
@@ -276,7 +276,7 @@ async function invListByUsername(username, game) {
   return u ? await invList(u.id, game) : []
 }
 async function createOffer(fromId, fromName, adId, offerItems, requestItems) {
-  const ad = (await sql`SELECT * FROM trade_ads WHERE id=${adId}`)[0]
+  const ad = (await sql`SELECT * FROM rex_trade_ads WHERE id=${adId}`)[0]
   if (!ad) throw new Error('Ad not found')
   if (ad.status !== 'open') throw new Error('Ad is no longer open')
   if (ad.user_id === fromId) throw new Error("You can't make an offer on your own ad")
@@ -299,12 +299,12 @@ async function createOffer(fromId, fromName, adId, offerItems, requestItems) {
   }
   const id = crypto.randomUUID()
   await sql`
-    INSERT INTO trade_offers (id, ad_id, game, from_id, from_name, to_id, to_name, offer_items, request_items)
+    INSERT INTO rex_trade_offers (id, ad_id, game, from_id, from_name, to_id, to_name, offer_items, request_items)
     VALUES (${id},${adId},${ad.game},${fromId},${fromName},${ad.user_id},${ad.username},${JSON.stringify(offerItems)},${JSON.stringify(requestItems)})`
   return id
 }
 async function acceptOffer(offerId, byId) {
-  const o = (await sql`SELECT * FROM trade_offers WHERE id=${offerId}`)[0]
+  const o = (await sql`SELECT * FROM rex_trade_offers WHERE id=${offerId}`)[0]
   if (!o) throw new Error('Offer not found')
   if (o.to_id !== byId) throw new Error('Only the ad owner can accept this offer')
   if (o.status !== 'pending') throw new Error('Offer is no longer pending')
@@ -314,25 +314,25 @@ async function acceptOffer(offerId, byId) {
   for (const r of o.request_items) { const ok = await removeItem(o.to_id, o.game, r.item, r.qty); if (!ok) throw new Error(`You no longer have ${r.qty}x ${r.item}`) }
   for (const r of o.request_items) await addItem(o.from_id, o.game, r.item, r.qty)
   for (const it of o.offer_items) await addItem(o.to_id, o.game, it.item, it.qty)
-  await sql`UPDATE trade_offers SET status='accepted' WHERE id=${offerId}`
+  await sql`UPDATE rex_trade_offers SET status='accepted' WHERE id=${offerId}`
   // Close the ad, release its original escrow back to the owner.
-  const ad = (await sql`SELECT * FROM trade_ads WHERE id=${o.ad_id}`)[0]
+  const ad = (await sql`SELECT * FROM rex_trade_ads WHERE id=${o.ad_id}`)[0]
   if (ad && ad.status === 'open') {
     for (const it of ad.offering) await addItem(ad.user_id, ad.game, it.item, it.qty)
-    await sql`UPDATE trade_ads SET status='completed', buyer_id=${o.from_id}, buyer_name=${o.from_name}, completed_at=NOW() WHERE id=${o.ad_id}`
+    await sql`UPDATE rex_trade_ads SET status='completed', buyer_id=${o.from_id}, buyer_name=${o.from_name}, completed_at=NOW() WHERE id=${o.ad_id}`
   }
   // Decline sibling offers and release their escrow.
-  const sibs = await sql`SELECT * FROM trade_offers WHERE ad_id=${o.ad_id} AND status='pending' AND id != ${offerId}`
-  for (const s of sibs) { for (const it of s.offer_items) await addItem(s.from_id, s.game, it.item, it.qty); await sql`UPDATE trade_offers SET status='declined' WHERE id=${s.id}` }
+  const sibs = await sql`SELECT * FROM rex_trade_offers WHERE ad_id=${o.ad_id} AND status='pending' AND id != ${offerId}`
+  for (const s of sibs) { for (const it of s.offer_items) await addItem(s.from_id, s.game, it.item, it.qty); await sql`UPDATE rex_trade_offers SET status='declined' WHERE id=${s.id}` }
 }
 async function setOfferStatus(offerId, userId, action) {
-  const o = (await sql`SELECT * FROM trade_offers WHERE id=${offerId}`)[0]
+  const o = (await sql`SELECT * FROM rex_trade_offers WHERE id=${offerId}`)[0]
   if (!o) throw new Error('Offer not found')
   if (o.status !== 'pending') throw new Error('Offer is no longer pending')
   if (action === 'decline' && o.to_id !== userId) throw new Error('Only the ad owner can decline')
   if (action === 'cancel' && o.from_id !== userId) throw new Error('Only the sender can cancel')
   for (const it of o.offer_items) await addItem(o.from_id, o.game, it.item, it.qty)
-  await sql`UPDATE trade_offers SET status=${action === 'cancel' ? 'cancelled' : 'declined'} WHERE id=${offerId}`
+  await sql`UPDATE rex_trade_offers SET status=${action === 'cancel' ? 'cancelled' : 'declined'} WHERE id=${offerId}`
 }
 
 // ── Handler ───────────────────────────────────────────────────────────────────
@@ -363,7 +363,7 @@ export default async function handler(req, res) {
       if (!key) return res.status(400) && json({ error: 'roblox_username required' })
       const phrase = generatePhrase()
       await sql`
-        INSERT INTO roblox_challenges (roblox_username, phrase, expires_at)
+        INSERT INTO rex_challenges (roblox_username, phrase, expires_at)
         VALUES (${key},${phrase},NOW() + INTERVAL '10 minutes')
         ON CONFLICT (roblox_username) DO UPDATE SET phrase=${phrase}, expires_at=NOW() + INTERVAL '10 minutes'`
       return json({ phrase })
@@ -372,13 +372,13 @@ export default async function handler(req, res) {
     if (path === '/roblox/verify' && method === 'POST') {
       const key = normalizeUsername(req.body?.roblox_username)
       if (!key) return res.status(400) && json({ error: 'roblox_username required' })
-      const ch = await sql`SELECT phrase FROM roblox_challenges WHERE roblox_username=${key} AND expires_at > NOW()`
+      const ch = await sql`SELECT phrase FROM rex_challenges WHERE roblox_username=${key} AND expires_at > NOW()`
       if (!ch[0]) return res.status(400) && json({ error: 'Challenge expired or not found. Start over.' })
       const robloxId = await fetchRobloxUserId(key)
       if (!robloxId) return res.status(400) && json({ error: 'Roblox username not found' })
       const bio = await fetchRobloxBio(robloxId)
       if (!bio.includes(ch[0].phrase)) return res.status(400) && json({ error: 'Phrase not found in your Roblox bio. Add it and try again.' })
-      await sql`DELETE FROM roblox_challenges WHERE roblox_username=${key}`
+      await sql`DELETE FROM rex_challenges WHERE roblox_username=${key}`
       let u = (await sql`SELECT id, username, role FROM users WHERE roblox_id=${String(robloxId)}`)[0]
       if (!u) {
         const id = crypto.randomUUID()
@@ -415,7 +415,7 @@ export default async function handler(req, res) {
     if (path === '/ads' && method === 'GET') {
       const game = url.searchParams.get('game') || 'growagarden'
       const u = await sessionUser(req)
-      const rows = await sql`SELECT * FROM trade_ads WHERE game=${game} AND status='open' ORDER BY created_at DESC LIMIT 100`
+      const rows = await sql`SELECT * FROM rex_trade_ads WHERE game=${game} AND status='open' ORDER BY created_at DESC LIMIT 100`
       const ads = rows.map((a) => ({
         id: a.id, game: a.game, username: a.username, offering: a.offering, requesting: a.requesting,
         note: a.note, offerValue: sumValue(a.game, a.offering), requestValue: sumValue(a.game, a.requesting),
@@ -451,8 +451,8 @@ export default async function handler(req, res) {
       const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
       const box = url.searchParams.get('box') || 'incoming'
       const rows = box === 'outgoing'
-        ? await sql`SELECT * FROM trade_offers WHERE status='pending' AND from_id=${u.id} ORDER BY created_at DESC LIMIT 100`
-        : await sql`SELECT * FROM trade_offers WHERE status='pending' AND to_id=${u.id} ORDER BY created_at DESC LIMIT 100`
+        ? await sql`SELECT * FROM rex_trade_offers WHERE status='pending' AND from_id=${u.id} ORDER BY created_at DESC LIMIT 100`
+        : await sql`SELECT * FROM rex_trade_offers WHERE status='pending' AND to_id=${u.id} ORDER BY created_at DESC LIMIT 100`
       return json({ offers: rows.map((o) => ({ id: o.id, adId: o.ad_id, game: o.game, fromName: o.from_name, toName: o.to_name, offerItems: o.offer_items, requestItems: o.request_items })) })
     }
     if ((m = path.match(/^\/offers\/([^/]+)\/accept$/)) && method === 'POST') {
@@ -474,14 +474,14 @@ export default async function handler(req, res) {
       const mine = box === 'mine' && u
       const name = mine ? u.username : null
       const cnt = mine
-        ? await sql`SELECT COUNT(*)::int AS n FROM trade_ads WHERE game=${game} AND status='completed' AND (username=${name} OR buyer_name=${name}) AND (offering::text ILIKE ${pat} OR requesting::text ILIKE ${pat})`
-        : await sql`SELECT COUNT(*)::int AS n FROM trade_ads WHERE game=${game} AND status='completed' AND (offering::text ILIKE ${pat} OR requesting::text ILIKE ${pat})`
+        ? await sql`SELECT COUNT(*)::int AS n FROM rex_trade_ads WHERE game=${game} AND status='completed' AND (username=${name} OR buyer_name=${name}) AND (offering::text ILIKE ${pat} OR requesting::text ILIKE ${pat})`
+        : await sql`SELECT COUNT(*)::int AS n FROM rex_trade_ads WHERE game=${game} AND status='completed' AND (offering::text ILIKE ${pat} OR requesting::text ILIKE ${pat})`
       const totalPages = Math.max(1, Math.ceil((cnt[0]?.n || 0) / PAGE))
       const page = Math.min(Math.max(1, parseInt(url.searchParams.get('page')) || 1), totalPages)
       const offset = (page - 1) * PAGE
       const rows = mine
-        ? await sql`SELECT username, buyer_name, offering, requesting, completed_at FROM trade_ads WHERE game=${game} AND status='completed' AND (username=${name} OR buyer_name=${name}) AND (offering::text ILIKE ${pat} OR requesting::text ILIKE ${pat}) ORDER BY completed_at DESC LIMIT ${PAGE} OFFSET ${offset}`
-        : await sql`SELECT username, buyer_name, offering, requesting, completed_at FROM trade_ads WHERE game=${game} AND status='completed' AND (offering::text ILIKE ${pat} OR requesting::text ILIKE ${pat}) ORDER BY completed_at DESC LIMIT ${PAGE} OFFSET ${offset}`
+        ? await sql`SELECT username, buyer_name, offering, requesting, completed_at FROM rex_trade_ads WHERE game=${game} AND status='completed' AND (username=${name} OR buyer_name=${name}) AND (offering::text ILIKE ${pat} OR requesting::text ILIKE ${pat}) ORDER BY completed_at DESC LIMIT ${PAGE} OFFSET ${offset}`
+        : await sql`SELECT username, buyer_name, offering, requesting, completed_at FROM rex_trade_ads WHERE game=${game} AND status='completed' AND (offering::text ILIKE ${pat} OR requesting::text ILIKE ${pat}) ORDER BY completed_at DESC LIMIT ${PAGE} OFFSET ${offset}`
       return json({ trades: rows.map((t) => ({ seller: t.username, buyer: t.buyer_name, offering: t.offering, requesting: t.requesting, completedAt: t.completed_at })), page, totalPages })
     }
 
@@ -506,12 +506,12 @@ export default async function handler(req, res) {
       }
       for (const it of items) await removeItem(u.id, game, it.item, it.qty)
       const id = crypto.randomUUID()
-      await sql`INSERT INTO pending_withdrawals (id, game, user_id, username, items) VALUES (${id},${game},${u.id},${u.username},${JSON.stringify(items)})`
+      await sql`INSERT INTO rex_pending_withdrawals (id, game, user_id, username, items) VALUES (${id},${game},${u.id},${u.username},${JSON.stringify(items)})`
       return json({ ok: true, id })
     }
     if (path === '/withdraw/pending' && method === 'GET') {
       const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
-      const rows = await sql`SELECT id, game, items, created_at FROM pending_withdrawals WHERE user_id=${u.id} AND status='pending' ORDER BY created_at DESC`
+      const rows = await sql`SELECT id, game, items, created_at FROM rex_pending_withdrawals WHERE user_id=${u.id} AND status='pending' ORDER BY created_at DESC`
       return json({ withdrawals: rows })
     }
 
