@@ -343,9 +343,6 @@ function header() {
     const wd = el('<button class="btn" style="margin-left:8px">Withdraw</button>')
     wd.onclick = () => withdrawModal()
     center.appendChild(wd)
-    const chatBtn = el('<button class="btn ghost" style="margin-left:8px" id="gcToggle">💬 Chat</button>')
-    chatBtn.onclick = () => { state.globalChat.open = !state.globalChat.open; render() }
-    center.appendChild(chatBtn)
     ua.innerHTML = `<span class="who">Signed in as <b>${state.user.username}</b></span>`
     const btn = el('<button class="btn ghost" style="margin-left:12px">Logout</button>')
     btn.onclick = async () => { await api.post('/api/logout'); state.user = null; render() }
@@ -831,23 +828,15 @@ function historyView() {
 let _gcPollTimer = null
 
 function mountGlobalChat() {
-  const open = !!(state.user && state.globalChat.open)
-  document.body.classList.toggle('chat-open', open)
+  // Panel already exists — nothing to do
+  if (document.getElementById('globalChat')) return
 
-  // Panel already exists — just show/hide, don't rebuild
-  const existing = document.getElementById('globalChat')
-  if (existing) {
-    existing.style.display = open ? 'flex' : 'none'
-    return
-  }
-
-  // First-time creation — only if user is logged in
+  // Only create when logged in
   if (!state.user) return
 
-  const panel = el(`<div id="globalChat" class="gc-panel" style="display:${open ? 'flex' : 'none'}">
+  const panel = el(`<div id="globalChat" class="gc-panel">
     <div class="gc-head">
       <span class="gc-title">💬 Global Chat</span>
-      <button class="gc-close" id="gcClose">✕</button>
     </div>
     <div class="gc-messages" id="gcMsgs"></div>
     <div class="gc-input-row">
@@ -856,11 +845,6 @@ function mountGlobalChat() {
   </div>`)
 
   document.body.appendChild(panel)
-  panel.querySelector('#gcClose').onclick = () => {
-    state.globalChat.open = false
-    panel.style.display = 'none'
-    document.body.classList.remove('chat-open')
-  }
 
   const msgsEl = panel.querySelector('#gcMsgs')
   const input = panel.querySelector('#gcInput')

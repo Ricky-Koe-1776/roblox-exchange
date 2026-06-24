@@ -180,12 +180,9 @@
     .dm-link { cursor: pointer; }
     .dm-link:hover { text-decoration: underline; color: var(--accent); }
     /* Global chat — full-height right sidebar */
-    body.chat-open .wrap { padding-right: 300px; }
     .gc-panel { position: fixed; top: 61px; right: 0; bottom: 0; width: 280px; background: var(--panel); border-left: 1px solid var(--line); display: flex; flex-direction: column; z-index: 30; }
     .gc-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border-bottom: 1px solid var(--line); flex-shrink: 0; }
     .gc-title { font-weight: 800; font-size: 14px; }
-    .gc-close { background: none; border: none; color: var(--muted); font-size: 20px; cursor: pointer; line-height: 1; padding: 0; }
-    .gc-close:hover { color: var(--danger); }
     .gc-messages { flex: 1; overflow-y: auto; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
     .gc-msg { display: flex; flex-direction: column; gap: 1px; }
     .gc-who { font-size: 12px; font-weight: 700; color: var(--accent); cursor: pointer; }
