@@ -461,6 +461,14 @@ export default async function handler(req, res) {
     if (path === '/me' && method === 'GET') {
       const u = await sessionUser(req)
       if (!u) return json({ user: null })
+      // Backfill avatar_url for users who logged in before the column was added
+      if (!u.avatar_url && u.roblox_id) {
+        const avatarUrl = await fetchAvatarUrl(u.roblox_id)
+        if (avatarUrl) {
+          await sql`UPDATE users SET avatar_url=${avatarUrl} WHERE id=${u.id}`.catch(() => {})
+          u.avatar_url = avatarUrl
+        }
+      }
       return json({ user: { id: u.id, username: u.username, role: u.role, avatar: u.avatar_url || null } })
     }
     if (path === '/avatar' && method === 'GET') {
