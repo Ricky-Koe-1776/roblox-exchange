@@ -172,8 +172,10 @@ async function ensureInit() {
       to_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       PRIMARY KEY (from_id, to_id)
     )`
-  // Make ad_id nullable for direct offers (idempotent)
+  // Migrations (idempotent)
   await sql`ALTER TABLE rex_trade_offers ALTER COLUMN ad_id DROP NOT NULL`.catch(() => {})
+  await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT`
+  await sql`ALTER TABLE rex_trade_ads ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ`
   _initDone = true
 }
 
@@ -242,7 +244,7 @@ function setCookie(name, value, maxAge) {
 async function sessionUser(req) {
   const sid = parseCookies(req.headers.cookie || '').rex_sid
   if (!sid) return null
-  const rows = await sql`SELECT u.id, u.username, u.role, u.roblox_id FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id=${sid}`
+  const rows = await sql`SELECT u.id, u.username, u.role, u.roblox_id, u.avatar_url FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id=${sid}`
   return rows[0] || null
 }
 
@@ -270,8 +272,8 @@ async function createAd(userId, username, game, offering, requesting, note) {
   }
   const id = crypto.randomUUID()
   await sql`
-    INSERT INTO rex_trade_ads (id, game, user_id, username, offering, requesting, note)
-    VALUES (${id},${game},${userId},${username},${JSON.stringify(offering)},${JSON.stringify(requesting)},${(note || '').slice(0,140)})`
+    INSERT INTO rex_trade_ads (id, game, user_id, username, offering, requesting, note, expires_at)
+    VALUES (${id},${game},${userId},${username},${JSON.stringify(offering)},${JSON.stringify(requesting)},${(note || '').slice(0,140)},NOW() + INTERVAL '24 hours')`
   return id
 }
 async function acceptAd(adId, buyer) {
@@ -441,11 +443,14 @@ export default async function handler(req, res) {
       const bio = await fetchRobloxBio(robloxId)
       if (!bio.includes(ch[0].phrase)) return res.status(400) && json({ error: 'Phrase not found in your Roblox bio. Add it and try again.' })
       await sql`DELETE FROM rex_challenges WHERE roblox_username=${key}`
+      const avatarUrl = await fetchAvatarUrl(robloxId)
       let u = (await sql`SELECT id, username, role FROM users WHERE roblox_id=${String(robloxId)}`)[0]
       if (!u) {
         const id = crypto.randomUUID()
-        await sql`INSERT INTO users (id, username, roblox_id) VALUES (${id},${key},${String(robloxId)}) ON CONFLICT (roblox_id) DO UPDATE SET username=${key}`
+        await sql`INSERT INTO users (id, username, roblox_id, avatar_url) VALUES (${id},${key},${String(robloxId)},${avatarUrl}) ON CONFLICT (roblox_id) DO UPDATE SET username=${key}, avatar_url=${avatarUrl}`
         u = (await sql`SELECT id, username, role FROM users WHERE id=${id}`)[0]
+      } else {
+        await sql`UPDATE users SET avatar_url=${avatarUrl} WHERE id=${u.id}`
       }
       const sid = crypto.randomUUID()
       await sql`INSERT INTO sessions (id, user_id) VALUES (${sid}, ${u.id})`
@@ -456,8 +461,7 @@ export default async function handler(req, res) {
     if (path === '/me' && method === 'GET') {
       const u = await sessionUser(req)
       if (!u) return json({ user: null })
-      const avatar = u.roblox_id ? await fetchAvatarUrl(u.roblox_id) : null
-      return json({ user: { id: u.id, username: u.username, role: u.role, avatar } })
+      return json({ user: { id: u.id, username: u.username, role: u.role, avatar: u.avatar_url || null } })
     }
     if (path === '/avatar' && method === 'GET') {
       const username = (url.searchParams.get('username') || '').trim()
@@ -488,9 +492,15 @@ export default async function handler(req, res) {
     if (path === '/ads' && method === 'GET') {
       const game = url.searchParams.get('game') || 'growagarden'
       const u = await sessionUser(req)
-      const rows = await sql`SELECT * FROM rex_trade_ads WHERE game=${game} AND status='open' ORDER BY created_at DESC LIMIT 100`
+      // Auto-expire stale ads
+      await sql`UPDATE rex_trade_ads SET status='expired' WHERE status='open' AND expires_at IS NOT NULL AND expires_at < NOW()`.catch(() => {})
+      const rows = await sql`
+        SELECT a.*, u.avatar_url FROM rex_trade_ads a
+        LEFT JOIN users u ON u.id=a.user_id
+        WHERE a.game=${game} AND a.status='open' ORDER BY a.created_at DESC LIMIT 100`
       const ads = rows.map((a) => ({
-        id: a.id, game: a.game, username: a.username, offering: a.offering, requesting: a.requesting,
+        id: a.id, game: a.game, username: a.username, avatar: a.avatar_url || null,
+        offering: a.offering, requesting: a.requesting,
         note: a.note, offerValue: sumValue(a.game, a.offering), requestValue: sumValue(a.game, a.requesting),
         mine: u ? a.user_id === u.id : false,
       }))
@@ -569,8 +579,8 @@ export default async function handler(req, res) {
       const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
       const before = url.searchParams.get('before') // ISO timestamp for pagination
       const rows = before
-        ? await sql`SELECT id, username, message, created_at FROM rex_chat_messages WHERE created_at < ${before} ORDER BY created_at DESC LIMIT 50`
-        : await sql`SELECT id, username, message, created_at FROM rex_chat_messages ORDER BY created_at DESC LIMIT 50`
+        ? await sql`SELECT m.id, m.username, m.message, m.created_at, u.avatar_url FROM rex_chat_messages m LEFT JOIN users u ON u.id=m.user_id WHERE m.created_at < ${before} ORDER BY m.created_at DESC LIMIT 50`
+        : await sql`SELECT m.id, m.username, m.message, m.created_at, u.avatar_url FROM rex_chat_messages m LEFT JOIN users u ON u.id=m.user_id ORDER BY m.created_at DESC LIMIT 50`
       return json({ messages: rows.reverse() })
     }
     if (path === '/chat/global' && method === 'POST') {
@@ -639,7 +649,7 @@ export default async function handler(req, res) {
     }
     if ((m = path.match(/^\/users\/([^/]+)\/thumbsup$/)) && method === 'POST') {
       const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
-      const target = (await sql`SELECT id FROM users WHERE LOWER(roblox_username)=LOWER(${m[1]})`)[0]
+      const target = (await sql`SELECT id FROM users WHERE LOWER(username)=LOWER(${m[1]})`)[0]
       if (!target) return res.status(404) && json({ error: 'User not found' })
       if (target.id === u.id) return res.status(400) && json({ error: "Can't thumb-up yourself" })
       await sql`INSERT INTO rex_reputation (from_id, to_id) VALUES (${u.id}, ${target.id}) ON CONFLICT DO NOTHING`
@@ -653,13 +663,13 @@ export default async function handler(req, res) {
       const row = (await sql`SELECT id, username, roblox_id FROM users WHERE LOWER(username)=LOWER(${username})`)[0]
       if (!row) return res.status(404) && json({ error: 'User not found' })
       const [adsRows, invRows, countRow, repRow, myVote] = await Promise.all([
-        sql`SELECT * FROM rex_trade_ads WHERE user_id=${row.id} AND game=${game} AND status='open' ORDER BY created_at DESC LIMIT 20`,
+        sql`SELECT a.*, ${row.avatar_url || null} AS avatar_url FROM rex_trade_ads a WHERE a.user_id=${row.id} AND a.game=${game} AND a.status='open' AND (a.expires_at IS NULL OR a.expires_at > NOW()) ORDER BY a.created_at DESC LIMIT 20`,
         sql`SELECT item, qty FROM rex_inventories WHERE user_id=${row.id} AND game=${game} AND qty > 0 ORDER BY item`,
         sql`SELECT COUNT(*) FROM rex_trade_ads WHERE game=${game} AND status='completed' AND (user_id=${row.id} OR buyer_id=${row.id})`,
         sql`SELECT COUNT(*) FROM rex_reputation WHERE to_id=${row.id}`,
         sql`SELECT 1 FROM rex_reputation WHERE from_id=${u.id} AND to_id=${row.id}`,
       ])
-      const ads = adsRows.map((a) => ({ id: a.id, username: a.username, note: a.note, offering: a.offering, requesting: a.requesting, mine: a.user_id === u.id }))
+      const ads = adsRows.map((a) => ({ id: a.id, username: a.username, avatar: a.avatar_url || null, note: a.note, offering: a.offering, requesting: a.requesting, mine: a.user_id === u.id }))
       const inventory = invRows.map((r) => ({ item: r.item, qty: r.qty, rarity: '' }))
       const avatar = row.roblox_id ? await fetchAvatarUrl(row.roblox_id) : null
       return json({ username: row.username, targetId: row.id, avatar, stats: { completedTrades: Number(countRow[0].count), thumbsUp: Number(repRow[0].count), hasThumbedUp: myVote.length > 0 }, ads, inventory })

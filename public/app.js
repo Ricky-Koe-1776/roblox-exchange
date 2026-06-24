@@ -422,7 +422,7 @@ function adCard(ad) {
   const hasTags = ad.requesting.some((r) => r.tag)
   const ad_el = el(`<div class="ad ad-mkt">
     <div class="ad-head">
-      <div class="ad-user"><span class="seller dm-link" data-uname="${ad.username}">${ad.username}</span>${ad.note ? `<span class="note">"${ad.note}"</span>` : ''}</div>
+      <div class="ad-user">${ad.avatar ? `<img class="ad-avatar" src="${ad.avatar}" onerror="this.style.display='none'">` : ''}<span class="seller dm-link" data-uname="${ad.username}">${ad.username}</span>${ad.note ? `<span class="note">"${ad.note}"</span>` : ''}</div>
       <div class="ad-actions"></div>
     </div>
     <div class="ad-body">
@@ -843,7 +843,7 @@ function mountGlobalChat() {
 
   const panel = el(`<div id="globalChat" class="gc-panel">
     <div class="gc-head">
-      <span class="gc-title">💬 Global Chat</span>
+      <span class="gc-title">Global Chat</span>
     </div>
     <div class="gc-messages" id="gcMsgs"></div>
     <div class="gc-input-row">
@@ -862,10 +862,13 @@ function mountGlobalChat() {
     state.globalChat.messages.forEach((m) => {
       const mine = state.user && m.username === state.user.username
       const row = el(`<div class="gc-msg ${mine ? 'gc-mine' : ''}">
-        <span class="gc-who" data-uid="${m.user_id || ''}" data-uname="${m.username}">${m.username}</span>
-        <span class="gc-text">${escHtml(m.message)}</span>
+        ${m.avatar_url ? `<img class="gc-avatar" src="${m.avatar_url}" onerror="this.style.display='none'">` : '<div class="gc-avatar-ph"></div>'}
+        <div class="gc-msg-body">
+          <span class="gc-who" data-uid="${m.user_id || ''}" data-uname="${m.username}">${escHtml(m.username)}</span>
+          <span class="gc-text">${escHtml(m.message)}</span>
+        </div>
       </div>`)
-      row.querySelector('.gc-who').onclick = () => openDmWith(m.user_id, m.username)
+      row.querySelector('.gc-who').onclick = () => userPopover({ stopPropagation: () => {}, clientX: 0, clientY: 0 }, m.username)
       msgsEl.appendChild(row)
     })
     if (atBottom || state.globalChat.messages.length <= 10) msgsEl.scrollTop = msgsEl.scrollHeight

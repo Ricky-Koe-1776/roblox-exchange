@@ -184,6 +184,14 @@
     .players-input { flex: 1; background: var(--panel); border: 1px solid var(--line); color: var(--text); border-radius: 10px; padding: 10px 14px; font-size: 15px; font-family: inherit; outline: none; }
     .players-input:focus { border-color: var(--accent); }
     .nav-avatar { width: 28px; height: 28px; border-radius: 50%; object-fit: cover; margin-right: 8px; vertical-align: middle; }
+    .ad-avatar { width: 28px; height: 28px; border-radius: 50%; object-fit: cover; margin-right: 8px; vertical-align: middle; flex-shrink: 0; }
+    .ad-user { display: flex; align-items: center; }
+    .gc-avatar { width: 28px; height: 28px; border-radius: 50%; object-fit: cover; flex-shrink: 0; }
+    .gc-avatar-ph { width: 28px; height: 28px; border-radius: 50%; background: var(--panel-2); flex-shrink: 0; }
+    .gc-msg { display: flex; align-items: flex-start; gap: 8px; padding: 4px 0; }
+    .gc-msg-body { display: flex; flex-direction: column; min-width: 0; }
+    .gc-who { font-size: 12px; font-weight: 600; color: var(--accent); cursor: pointer; }
+    .gc-who:hover { text-decoration: underline; }
     .profile-head { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 24px; margin-bottom: 4px; }
     .profile-top { display: flex; align-items: center; gap: 16px; margin-bottom: 18px; }
     .profile-avatar { width: 72px; height: 72px; border-radius: 50%; object-fit: cover; border: 2px solid var(--line); flex-shrink: 0; }
@@ -206,9 +214,6 @@
     .gc-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border-bottom: 1px solid var(--line); flex-shrink: 0; }
     .gc-title { font-weight: 800; font-size: 14px; }
     .gc-messages { flex: 1; overflow-y: auto; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
-    .gc-msg { display: flex; flex-direction: column; gap: 1px; }
-    .gc-who { font-size: 12px; font-weight: 700; color: var(--accent); cursor: pointer; }
-    .gc-who:hover { text-decoration: underline; }
     .gc-text { font-size: 13px; color: var(--text); word-break: break-word; line-height: 1.4; }
     .gc-input-row { padding: 10px 12px; border-top: 1px solid var(--line); flex-shrink: 0; }
     .gc-input-row input { width: 100%; background: var(--panel-2); border: 1px solid var(--line); color: var(--text); border-radius: 8px; padding: 8px 10px; font-size: 13px; font-family: inherit; outline: none; }
