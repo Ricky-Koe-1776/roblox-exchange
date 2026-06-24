@@ -183,7 +183,7 @@ const WORDS = ['garden','dragon','mango','comet','pixel','otter','maple','quartz
 function generatePhrase() {
   const w = []
   for (let i = 0; i < 6; i++) w.push(WORDS[Math.floor(Math.random() * WORDS.length)])
-  return `ROBLOXEXCHANGE | ${w.join(' ')}`
+  return `RE | ${w.join(' ')}`
 }
 function normalizeUsername(u) { return (u || '').trim().toLowerCase() }
 async function fetchRobloxUserId(username) {
