@@ -1060,8 +1060,11 @@ function messagesView() {
     state.dms.conversations.forEach((conv) => {
       const active = conv.partner_id === state.dms.activeId
       const row = el(`<div class="dm-conv ${active ? 'dm-conv-active' : ''}">
-        <div class="dm-conv-name">${escHtml(conv.partner_name)}</div>
-        <div class="dm-conv-preview">${escHtml(conv.message || '')}</div>
+        ${conv.avatar_url ? `<img class="dm-conv-avatar" src="${conv.avatar_url}" onerror="this.style.display='none'">` : '<div class="dm-conv-avatar-ph"></div>'}
+        <div class="dm-conv-info">
+          <div class="dm-conv-name">${escHtml(conv.partner_name)}</div>
+          <div class="dm-conv-preview">${escHtml(conv.message || '')}</div>
+        </div>
       </div>`)
       row.onclick = () => { state.dms.activeId = conv.partner_id; state.dms.activeName = conv.partner_name; refresh() }
       sidebar.appendChild(row)

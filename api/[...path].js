@@ -605,8 +605,8 @@ export default async function handler(req, res) {
       const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
       // Get latest message per conversation partner
       const rows = await sql`
-        SELECT DISTINCT ON (partner_id)
-          partner_id, partner_name, message, created_at, read, from_id
+        SELECT DISTINCT ON (t.partner_id)
+          t.partner_id, t.partner_name, t.message, t.created_at, t.read, t.from_id, u.avatar_url
         FROM (
           SELECT to_id AS partner_id, to_name AS partner_name, message, created_at, read, from_id
           FROM rex_dm_messages WHERE from_id=${u.id}
@@ -614,7 +614,8 @@ export default async function handler(req, res) {
           SELECT from_id AS partner_id, from_name AS partner_name, message, created_at, read, from_id
           FROM rex_dm_messages WHERE to_id=${u.id}
         ) t
-        ORDER BY partner_id, created_at DESC`
+        LEFT JOIN users u ON u.id=t.partner_id
+        ORDER BY t.partner_id, t.created_at DESC`
       const unread = await sql`SELECT COUNT(*)::int AS n FROM rex_dm_messages WHERE to_id=${u.id} AND read=false`
       return json({ conversations: rows, unreadTotal: unread[0]?.n || 0 })
     }
