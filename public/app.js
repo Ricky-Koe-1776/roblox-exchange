@@ -309,6 +309,15 @@ function render() {
   const wrap = el('<div class="wrap"></div>')
   if (state.tab === 'trade') { wrap.appendChild(tradeView()); app.appendChild(wrap); return }
   wrap.appendChild(tabs())
+  if (state.user) {
+    const mdw = el('<div class="mobile-dw" style="display:none"></div>')
+    const dep2 = el('<button class="btn ghost" style="flex:1">Deposit</button>')
+    dep2.onclick = () => depositModal()
+    const wd2 = el('<button class="btn" style="flex:1">Withdraw</button>')
+    wd2.onclick = () => withdrawModal()
+    mdw.appendChild(dep2); mdw.appendChild(wd2)
+    wrap.appendChild(mdw)
+  }
   wrap.appendChild(
     state.tab === 'market' ? marketView()
       : state.tab === 'inventory' ? inventoryView()
@@ -844,6 +853,7 @@ function mountGlobalChat() {
   const panel = el(`<div id="globalChat" class="gc-panel">
     <div class="gc-head">
       <span class="gc-title">Global Chat</span>
+      <button class="gc-close-btn" id="gcCloseBtn" aria-label="Close chat">&times;</button>
     </div>
     <div class="gc-messages" id="gcMsgs"></div>
     <div class="gc-input-row">
@@ -851,7 +861,24 @@ function mountGlobalChat() {
     </div>
   </div>`)
 
+  // Mobile FAB to open chat
+  if (!document.getElementById('chatFab')) {
+    const fab = document.createElement('button')
+    fab.id = 'chatFab'
+    fab.className = 'chat-fab'
+    fab.innerHTML = '&#128172;'
+    fab.setAttribute('aria-label', 'Open chat')
+    fab.onclick = () => { panel.classList.add('mobile-open'); fab.style.display = 'none' }
+    document.body.appendChild(fab)
+  }
+
   document.body.appendChild(panel)
+
+  panel.querySelector('#gcCloseBtn').onclick = () => {
+    panel.classList.remove('mobile-open')
+    const fab = document.getElementById('chatFab')
+    if (fab) fab.style.display = ''
+  }
 
   const msgsEl = panel.querySelector('#gcMsgs')
   const input = panel.querySelector('#gcInput')

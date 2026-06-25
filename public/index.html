@@ -277,6 +277,91 @@
     .wd-q { background: var(--panel); border: 1px solid var(--line); color: var(--text); border-radius: 6px; width: 26px; height: 26px; font-size: 16px; font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; line-height: 1; padding: 0; }
     .wd-q:hover { border-color: var(--accent); color: var(--accent); }
     .wd-q-n { font-weight: 700; font-size: 13px; min-width: 28px; text-align: center; }
+
+    /* Mobile chat FAB — hidden on desktop */
+    .chat-fab { display: none; position: fixed; bottom: 20px; right: 16px; z-index: 100; width: 50px; height: 50px; background: var(--accent); border: none; border-radius: 50%; font-size: 22px; cursor: pointer; align-items: center; justify-content: center; box-shadow: 0 4px 16px rgba(0,0,0,.4); }
+    .chat-fab-badge { position: absolute; top: 4px; right: 4px; background: var(--danger); color: #fff; border-radius: 999px; font-size: 9px; font-weight: 800; padding: 1px 5px; }
+    .gc-close-btn { display: none; background: none; border: none; color: var(--muted); font-size: 22px; cursor: pointer; padding: 0 4px; line-height: 1; }
+
+    @media (max-width: 768px) {
+      /* Chat sidebar — hidden by default, shown as overlay when .mobile-open */
+      .gc-panel { display: none; }
+      .gc-panel.mobile-open { display: flex; top: 0; bottom: 0; right: 0; width: 100%; max-width: 360px; z-index: 200; box-shadow: -8px 0 32px rgba(0,0,0,.5); }
+      .chat-fab { display: flex; }
+      .gc-close-btn { display: block; }
+
+      /* Nav */
+      .nav { grid-template-columns: 1fr auto; }
+      .nav-center { display: none; }
+      .nav-right { gap: 6px; }
+      .nav-right .who { display: none; }
+      .nav-right .btn { padding: 7px 10px; font-size: 13px; }
+      .game-select { font-size: 12px; padding: 5px 8px; max-width: 130px; }
+
+      /* Tabs — horizontal scroll */
+      .tabs { overflow-x: auto; justify-content: flex-start; scrollbar-width: none; padding: 0 4px 2px; -webkit-overflow-scrolling: touch; }
+      .tabs::-webkit-scrollbar { display: none; }
+      .tab { white-space: nowrap; flex-shrink: 0; font-size: 13px; padding: 8px 12px; }
+
+      /* Wrap padding */
+      .wrap { padding: 0 12px; }
+
+      /* Ad body: stack offer → arrow → request */
+      .ad-body { grid-template-columns: 1fr; text-align: center; }
+      .ad-body .arrow { transform: rotate(90deg); display: inline-block; }
+
+      /* Marketplace ad head: stack username + actions */
+      .ad-head { flex-direction: column; align-items: flex-start; gap: 8px; }
+      .ad-actions { flex-wrap: wrap; }
+
+      /* Post a Trade builder */
+      .trade-panel { grid-template-columns: 1fr; }
+      .trade-mid { display: none; }
+      .slots { grid-template-columns: repeat(3, 1fr); }
+
+      /* 2-col builder → 1-col */
+      .builder { grid-template-columns: 1fr; }
+
+      /* Counter-offer trade grid */
+      .trade-grid { grid-template-columns: 1fr; }
+
+      /* View sides (offer viewer) */
+      .view-sides { grid-template-columns: 1fr; }
+      .confirm-sides { grid-template-columns: 1fr; }
+      .confirm-arrow { text-align: center; transform: rotate(90deg); display: inline-block; }
+      .modal-actions { justify-content: stretch; }
+      .modal-actions .btn { flex: 1; }
+
+      /* Filter bar */
+      .filterbar { grid-template-columns: 1fr; }
+
+      /* DM layout: stack sidebar over thread */
+      .dm-layout { grid-template-columns: 1fr; min-height: auto; }
+      .dm-sidebar { border-right: none; border-bottom: 1px solid var(--line); max-height: 200px; overflow-y: auto; flex-shrink: 0; }
+
+      /* Profile stats — wrap */
+      .profile-stats { flex-wrap: wrap; gap: 16px; }
+      .profile-top { align-items: flex-start; }
+
+      /* Inventory grid — smaller min */
+      .grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
+
+      /* Item picker grid */
+      .pickgrid { grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); }
+
+      /* Modal: full width */
+      .modal-bg { padding: 0; align-items: flex-end; }
+      .modal { max-width: 100%; border-radius: 16px 16px 0 0; }
+      .card.modal { border-radius: 16px 16px 0 0; }
+      .dep-modal { max-width: 100%; border-radius: 16px 16px 0 0; }
+      .wd-modal { max-width: 100%; border-radius: 16px 16px 0 0; }
+
+      /* Withdraw grid */
+      .wd-grid { grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); max-height: 300px; }
+
+      /* Mobile deposit/withdraw buttons: show in tab area instead of nav */
+      .mobile-dw { display: flex !important; gap: 8px; margin: 12px 0 4px; }
+    }
   </style>
 </head>
 <body>
