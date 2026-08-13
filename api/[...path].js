@@ -1,80 +1,45 @@
 // Roblox Exchange — production API (Vercel serverless + Neon Postgres).
 //
-// Standalone from the RoFlips network: its own users/sessions DB, its own
-// Roblox bio-verify auth, its own session cookie (rex_sid). Mirrors the RoFlips
-// single-file router pattern so it's familiar, but shares nothing with roflips.com.
+// robloxexchange.com is a marketplace for buying and selling whole Roblox
+// games (via Roblox group-ownership transfer), paid in USDC through Apirone.
+// Login is "Sign in with Roblox" via Roblox's real OAuth 2.0 / OIDC flow —
+// that also IS the account's verified Roblox identity, so no separate
+// "connect Roblox" step is needed anywhere else in the app.
+//
+// Order completion is MANUAL: an admin confirms the Roblox group ownership
+// actually transferred to the buyer before releasing the seller's payout.
+// There is no automated Roblox-ownership poller.
 //
 // Routes (all under /api):
-//   GET  /games                      catalog
-//   POST /roblox/challenge           {roblox_username} -> {phrase} to put in bio
-//   POST /roblox/verify              {roblox_username} -> sets session cookie
-//   GET  /me                         current user or null
+//   GET  /roblox/oauth/start                 -> redirect to Roblox's authorize page
+//   GET  /roblox/oauth/callback              -> exchanges code, sets session cookie
+//   GET  /me                                 current user or null
 //   POST /logout
-//   GET  /inventory?game=            current user's per-game inventory
-//   GET  /ads?game=                  open trade ads
-//   POST /ads                        create ad (reserves offered items in escrow)
-//   POST /ads/:id/accept             atomic swap
-//   POST /ads/:id/cancel             release escrow
-//   GET  /history?game=              completed trades
-//
-// Deposits/withdrawals (the gifting bot) are not wired yet — new users start
-// with an empty inventory until the custody bot calls grant/deduct.
+//   GET  /marketplace/listings               active listings
+//   GET  /marketplace/listings/:id           listing detail
+//   POST /marketplace/listings               create listing (verifies group ownership)
+//   POST /marketplace/listings/:id/cancel    seller removes their own listing
+//   POST /marketplace/listings/:id/buy       creates an order + Apirone invoice
+//   GET  /marketplace/orders/:id             order detail (buyer/seller/admin)
+//   POST /marketplace/orders/:id/check-payment
+//   POST /marketplace/orders/:id/cancel      buyer cancels before paying
+//   GET  /marketplace/orders?box=buying|selling
+//   GET  /marketplace/admin/orders           admin: paid orders awaiting finalization
+//   POST /marketplace/orders/:id/finalize    admin: release seller payout
+//   POST /marketplace/apirone/callback       Apirone payment webhook
+//   GET  /marketplace/wallet                 balance + ledger
+//   POST /marketplace/wallet/withdraw        request payout to an address
 
 import { neon } from '@neondatabase/serverless'
 import crypto from 'crypto'
+import { createInvoice, getInvoiceStatus } from '../lib/apirone.mjs'
 
 const sql = neon(process.env.POSTGRES_URL)
+const ADMIN_USERNAMES = (process.env.ADMIN_USERNAMES || '').toLowerCase().split(',').map((s) => s.trim()).filter(Boolean)
 
-// ── Game catalogs (community trade values) ────────────────────────────────────
-// Grow a Garden splits into seeds (crops) and pets. Pets have 3 size mutation
-// tiers — Normal / Big / Huge — same art, bigger = rarer. buildGagItems() expands
-// each pet into all three as distinct tradeable items.
-const GAG_SEEDS = [
-  { name: 'Moon Bloom', rarity: 'Super', value: 7000, slug: 'moon-bloom' },
-  { name: 'Poison Ivy', rarity: 'Legendary', value: 6000, slug: 'poison-ivy' },
-  { name: "Dragon's Breath", rarity: 'Super', value: 3500, slug: 'dragon-s-breath' },
-  { name: 'Glow Mushroom', rarity: 'Epic', value: 3000, slug: 'glow-mushroom' },
-  { name: 'Ghost Pepper', rarity: 'Mythic', value: 2500, slug: 'ghost-pepper' },
-  { name: 'Venom Spitter', rarity: 'Mythic', value: 1700, slug: 'venom-spitter' },
-  { name: 'Poison Apple', rarity: 'Mythic', value: 1300, slug: 'poison-apple' },
-  { name: 'Green Bean', rarity: 'Epic', value: 850, slug: 'green-bean' },
-  { name: 'Baby Cactus', rarity: 'Rare', value: 800, slug: 'baby-cactus' },
-  { name: 'Cherry', rarity: 'Legendary', value: 700, slug: 'cherry' },
-]
-const GAG_PETS = [
-  { name: 'Ice Serpent', rarity: 'Super', value: 75000, slug: 'ice-serpent' },
-  { name: 'Raccoon', rarity: 'Super', value: 11000, slug: 'raccoon' },
-  { name: 'Unicorn', rarity: 'Mythic', value: 1500, slug: 'unicorn' },
-  { name: 'Monkey', rarity: 'Mythic', value: 1000, slug: 'monkey' },
-  { name: 'Golden Dragonfly', rarity: 'Mythic', value: 1000, slug: 'golden-dragonfly' },
-  { name: 'Bear', rarity: 'Mythic', value: 500, slug: 'bear' },
-  { name: 'Bee', rarity: 'Legendary', value: 500, slug: 'bee' },
-  { name: 'Owl', rarity: 'Uncommon', value: 500, slug: 'owl' },
-]
-const REQUEST_TAGS = ['Any', 'Demand', 'Big', 'Huge', 'Upgrade', 'Downgrade', 'Adds']
-const PET_TIERS = [
-  { prefix: '', imgPrefix: '', mult: 1, tier: 'Normal' },
-  { prefix: 'Big ', imgPrefix: 'big-', mult: 5, tier: 'Big' },
-  { prefix: 'Huge ', imgPrefix: 'huge-', mult: 25, tier: 'Huge' },
-]
-function buildGagItems() {
-  const items = []
-  for (const s of GAG_SEEDS) items.push({ name: s.name, rarity: s.rarity, value: s.value, img: `seeds/${s.slug}.webp`, kind: 'seed' })
-  for (const p of GAG_PETS) for (const t of PET_TIERS)
-    items.push({ name: `${t.prefix}${p.name}`, rarity: p.rarity, value: p.value * t.mult, img: `pets/${t.imgPrefix}${p.slug}.webp`, kind: 'pet', tier: t.tier })
-  return items
-}
-
-const GAMES = {
-  growagarden: {
-    label: 'Grow a Garden',
-    items: buildGagItems(),
-  },
-}
-function catalogItem(game, name) { return GAMES[game]?.items.find((i) => i.name === name) }
-function itemValue(game, name) { return catalogItem(game, name)?.value || 0 }
-function validItem(game, name) { return !!catalogItem(game, name) }
-function sumValue(game, list) { return list.reduce((s, l) => s + itemValue(game, l.item) * l.qty, 0) }
+const OAUTH_AUTHORIZE_URL = 'https://apis.roblox.com/oauth/v1/authorize'
+const OAUTH_TOKEN_URL = 'https://apis.roblox.com/oauth/v1/token'
+const OAUTH_USERINFO_URL = 'https://apis.roblox.com/oauth/v1/userinfo'
 
 // ── Schema bootstrap ──────────────────────────────────────────────────────────
 let _initDone = false
@@ -85,6 +50,7 @@ async function ensureInit() {
       id         TEXT PRIMARY KEY,
       username   TEXT UNIQUE NOT NULL,
       roblox_id  TEXT UNIQUE,
+      avatar_url TEXT,
       role       TEXT NOT NULL DEFAULT 'user',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`
@@ -95,139 +61,58 @@ async function ensureInit() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`
   await sql`
-    CREATE TABLE IF NOT EXISTS rex_inventories (
-      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      game    TEXT NOT NULL,
-      item    TEXT NOT NULL,
-      qty     INTEGER NOT NULL DEFAULT 0,
-      PRIMARY KEY (user_id, game, item)
+    CREATE TABLE IF NOT EXISTS rex_game_listings (
+      id              TEXT PRIMARY KEY,
+      seller_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      seller_username TEXT NOT NULL,
+      group_id        TEXT NOT NULL,
+      place_id        TEXT NOT NULL,
+      universe_id     TEXT NOT NULL,
+      title           TEXT NOT NULL,
+      description     TEXT DEFAULT '',
+      price_usdc      NUMERIC NOT NULL,
+      ccu             INTEGER DEFAULT 0,
+      visits          BIGINT DEFAULT 0,
+      favorites       INTEGER DEFAULT 0,
+      thumbnail_url   TEXT,
+      status          TEXT NOT NULL DEFAULT 'active',
+      created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`
   await sql`
-    CREATE TABLE IF NOT EXISTS rex_challenges (
-      roblox_username TEXT PRIMARY KEY,
-      phrase          TEXT NOT NULL,
-      expires_at      TIMESTAMPTZ NOT NULL
+    CREATE TABLE IF NOT EXISTS rex_game_orders (
+      id                TEXT PRIMARY KEY,
+      listing_id        TEXT NOT NULL REFERENCES rex_game_listings(id) ON DELETE CASCADE,
+      buyer_id          TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      buyer_username    TEXT NOT NULL,
+      buyer_roblox_id   TEXT NOT NULL,
+      seller_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      seller_username   TEXT NOT NULL,
+      price_usdc        NUMERIC NOT NULL,
+      invoice_id        TEXT,
+      pay_address       TEXT,
+      status            TEXT NOT NULL DEFAULT 'awaiting_payment',
+      paid_at           TIMESTAMPTZ,
+      transfer_deadline TIMESTAMPTZ,
+      completed_at      TIMESTAMPTZ,
+      cancelled_at      TIMESTAMPTZ,
+      created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`
   await sql`
-    CREATE TABLE IF NOT EXISTS rex_trade_ads (
-      id           TEXT PRIMARY KEY,
-      game         TEXT NOT NULL,
-      user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      username     TEXT NOT NULL,
-      offering     JSONB NOT NULL,
-      requesting   JSONB NOT NULL,
-      note         TEXT DEFAULT '',
-      status       TEXT NOT NULL DEFAULT 'open',
-      buyer_id     TEXT,
-      buyer_name   TEXT,
-      created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      completed_at TIMESTAMPTZ
+    CREATE TABLE IF NOT EXISTS rex_wallet_ledger (
+      id          TEXT PRIMARY KEY,
+      user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      kind        TEXT NOT NULL,
+      amount_usdc NUMERIC NOT NULL,
+      order_id    TEXT,
+      to_address  TEXT,
+      status      TEXT NOT NULL DEFAULT 'completed',
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`
-  await sql`
-    CREATE TABLE IF NOT EXISTS rex_trade_offers (
-      id            TEXT PRIMARY KEY,
-      ad_id         TEXT,
-      game          TEXT NOT NULL,
-      from_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      from_name     TEXT NOT NULL,
-      to_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      to_name       TEXT NOT NULL,
-      offer_items   JSONB NOT NULL,
-      request_items JSONB NOT NULL,
-      status        TEXT NOT NULL DEFAULT 'pending',
-      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )`
-  await sql`
-    CREATE TABLE IF NOT EXISTS rex_pending_withdrawals (
-      id         TEXT PRIMARY KEY,
-      game       TEXT NOT NULL,
-      user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      username   TEXT NOT NULL,
-      items      JSONB NOT NULL,
-      status     TEXT NOT NULL DEFAULT 'pending',
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )`
-  await sql`
-    CREATE TABLE IF NOT EXISTS rex_chat_messages (
-      id         TEXT PRIMARY KEY,
-      user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      username   TEXT NOT NULL,
-      message    TEXT NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )`
-  await sql`
-    CREATE TABLE IF NOT EXISTS rex_dm_messages (
-      id         TEXT PRIMARY KEY,
-      from_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      from_name  TEXT NOT NULL,
-      to_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      to_name    TEXT NOT NULL,
-      message    TEXT NOT NULL,
-      read       BOOLEAN NOT NULL DEFAULT false,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )`
-  await sql`
-    CREATE TABLE IF NOT EXISTS rex_reputation (
-      from_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      to_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      PRIMARY KEY (from_id, to_id)
-    )`
-  // Migrations (idempotent)
-  await sql`ALTER TABLE rex_trade_offers ALTER COLUMN ad_id DROP NOT NULL`.catch(() => {})
-  await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT`
-  await sql`ALTER TABLE rex_trade_ads ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ`
+  await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT` // safety net for pre-existing tables
   _initDone = true
 }
 
-const MAILBOX = {
-  growagarden: 'RobloxExchangeGAG',
-}
-
-// ── Inventory primitives (the gifting bot will reuse addItem/removeItem) ───────
-async function invQty(userId, game, item) {
-  const r = await sql`SELECT qty FROM rex_inventories WHERE user_id=${userId} AND game=${game} AND item=${item}`
-  return r[0]?.qty || 0
-}
-async function addItem(userId, game, item, qty) {
-  await sql`
-    INSERT INTO rex_inventories (user_id, game, item, qty) VALUES (${userId},${game},${item},${qty})
-    ON CONFLICT (user_id, game, item) DO UPDATE SET qty = rex_inventories.qty + ${qty}`
-}
-async function removeItem(userId, game, item, qty) {
-  const r = await sql`
-    UPDATE rex_inventories SET qty = qty - ${qty}
-    WHERE user_id=${userId} AND game=${game} AND item=${item} AND qty >= ${qty}
-    RETURNING qty`
-  if (!r.length) return false
-  if (r[0].qty === 0) await sql`DELETE FROM rex_inventories WHERE user_id=${userId} AND game=${game} AND item=${item} AND qty=0`
-  return true
-}
-async function invList(userId, game) {
-  const rows = await sql`SELECT item, qty FROM rex_inventories WHERE user_id=${userId} AND game=${game} ORDER BY qty DESC`
-  return rows.map((r) => ({ item: r.item, qty: r.qty, value: itemValue(game, r.item), rarity: catalogItem(game, r.item)?.rarity || 'Unknown' }))
-}
-
-// ── Auth helpers ──────────────────────────────────────────────────────────────
-const WORDS = ['garden','dragon','mango','comet','pixel','otter','maple','quartz','river','ember','lunar','cobalt','willow','sage','flint','onyx']
-function generatePhrase() {
-  const w = []
-  for (let i = 0; i < 6; i++) w.push(WORDS[Math.floor(Math.random() * WORDS.length)])
-  return `RE | ${w.join(' ')}`
-}
-function normalizeUsername(u) { return (u || '').trim().toLowerCase() }
-async function fetchRobloxUserId(username) {
-  const res = await fetch('https://users.roblox.com/v1/usernames/users', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ usernames: [username], excludeBannedUsers: false }),
-  })
-  const data = await res.json()
-  return data?.data?.[0]?.id || null
-}
-async function fetchRobloxBio(robloxId) {
-  const res = await fetch(`https://users.roblox.com/v1/users/${robloxId}`)
-  const data = await res.json()
-  return data?.description || ''
-}
+// ── Roblox lookups ────────────────────────────────────────────────────────────
 async function fetchAvatarUrl(robloxId) {
   try {
     const res = await fetch(`https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=${robloxId}&size=150x150&format=Png&isCircular=false`)
@@ -235,6 +120,41 @@ async function fetchAvatarUrl(robloxId) {
     return data?.data?.[0]?.imageUrl || null
   } catch { return null }
 }
+async function fetchGroupInfo(groupId) {
+  try {
+    const res = await fetch(`https://groups.roblox.com/v1/groups/${groupId}`)
+    if (!res.ok) return null
+    const data = await res.json()
+    return { name: data?.name || '', ownerId: data?.owner?.userId ? String(data.owner.userId) : null }
+  } catch { return null }
+}
+async function fetchUniverseFromPlace(placeId) {
+  try {
+    const res = await fetch(`https://apis.roblox.com/universes/v1/places/${placeId}/universe`)
+    if (!res.ok) return null
+    const data = await res.json()
+    return data?.universeId ? String(data.universeId) : null
+  } catch { return null }
+}
+async function fetchGameStats(universeId) {
+  try {
+    const res = await fetch(`https://games.roblox.com/v1/games?universeIds=${universeId}`)
+    if (!res.ok) return null
+    const g = (await res.json())?.data?.[0]
+    if (!g) return null
+    return { ccu: g.playing || 0, visits: g.visits || 0, favorites: g.favoritedCount || 0 }
+  } catch { return null }
+}
+async function fetchGameThumbnail(universeId) {
+  try {
+    const res = await fetch(`https://thumbnails.roblox.com/v1/games/icons?universeIds=${universeId}&size=512x512&format=Png`)
+    const data = await res.json()
+    return data?.data?.[0]?.imageUrl || null
+  } catch { return null }
+}
+function isAdmin(u) { return u?.role === 'admin' }
+
+// ── Cookies / sessions ────────────────────────────────────────────────────────
 function parseCookies(header = '') {
   return Object.fromEntries(header.split(';').map((c) => c.trim().split('=')).filter((p) => p[0]).map((p) => [p[0], decodeURIComponent(p[1] || '')]))
 }
@@ -248,156 +168,11 @@ async function sessionUser(req) {
   return rows[0] || null
 }
 
-// ── Trade logic ───────────────────────────────────────────────────────────────
-async function createAd(userId, username, game, offering, requesting, note) {
-  if (!Array.isArray(offering) || !Array.isArray(requesting) || !offering.length || !requesting.length)
-    throw new Error('Offer and request must each have at least one item')
-  for (const o of offering) {
-    if (o.tag) throw new Error('Offer must be specific items, not tags')
-    if (!validItem(game, o.item)) throw new Error(`Unknown item: ${o.item}`)
-    if (!(o.qty > 0)) throw new Error('Quantity must be positive')
-  }
-  // Requests may be specific items or preference tags (Any/Demand/Big/...).
-  for (const r of requesting) {
-    if (r.tag) { if (!REQUEST_TAGS.includes(r.tag)) throw new Error(`Unknown tag: ${r.tag}`); continue }
-    if (!validItem(game, r.item)) throw new Error(`Unknown item: ${r.item}`)
-    if (!(r.qty > 0)) throw new Error('Quantity must be positive')
-  }
-  // Reserve offered items (escrow). Fail atomically if any is short.
-  const reserved = []
-  for (const o of offering) {
-    const ok = await removeItem(userId, game, o.item, o.qty)
-    if (!ok) { for (const r of reserved) await addItem(userId, game, r.item, r.qty); throw new Error(`You don't have ${o.qty}x ${o.item}`) }
-    reserved.push(o)
-  }
-  const id = crypto.randomUUID()
-  await sql`
-    INSERT INTO rex_trade_ads (id, game, user_id, username, offering, requesting, note, expires_at)
-    VALUES (${id},${game},${userId},${username},${JSON.stringify(offering)},${JSON.stringify(requesting)},${(note || '').slice(0,140)},NOW() + INTERVAL '24 hours')`
-  return id
-}
-async function acceptAd(adId, buyer) {
-  const rows = await sql`SELECT * FROM rex_trade_ads WHERE id=${adId}`
-  const ad = rows[0]
-  if (!ad) throw new Error('Ad not found')
-  if (ad.status !== 'open') throw new Error('Ad is no longer open')
-  if (ad.user_id === buyer.id) throw new Error("You can't accept your own ad")
-  const requesting = ad.requesting, offering = ad.offering
-  if (requesting.some((r) => r.tag)) throw new Error('This ad takes offers, not instant accept')
-  for (const r of requesting) {
-    if (await invQty(buyer.id, ad.game, r.item) < r.qty) throw new Error(`You don't have ${r.qty}x ${r.item} to complete this trade`)
-  }
-  // Atomic swap: buyer's requested -> seller; escrowed offered -> buyer.
-  for (const r of requesting) {
-    const ok = await removeItem(buyer.id, ad.game, r.item, r.qty)
-    if (!ok) throw new Error(`You don't have ${r.qty}x ${r.item}`)
-  }
-  for (const r of requesting) await addItem(ad.user_id, ad.game, r.item, r.qty)
-  for (const o of offering) await addItem(buyer.id, ad.game, o.item, o.qty)
-  await sql`UPDATE rex_trade_ads SET status='completed', buyer_id=${buyer.id}, buyer_name=${buyer.username}, completed_at=NOW() WHERE id=${adId}`
-}
-async function cancelAd(adId, userId) {
-  const rows = await sql`SELECT * FROM rex_trade_ads WHERE id=${adId}`
-  const ad = rows[0]
-  if (!ad) throw new Error('Ad not found')
-  if (ad.user_id !== userId) throw new Error('Not your ad')
-  if (ad.status !== 'open') throw new Error('Ad is no longer open')
-  for (const o of ad.offering) await addItem(userId, ad.game, o.item, o.qty)
-  await sql`UPDATE rex_trade_ads SET status='cancelled' WHERE id=${adId}`
-}
-
-// ── Counter-offers (Roblox-style trade builder) ───────────────────────────────
-async function invListByUsername(username, game) {
-  const u = (await sql`SELECT id FROM users WHERE username=${(username || '').toLowerCase()}`)[0]
-  return u ? await invList(u.id, game) : []
-}
-async function createOffer(fromId, fromName, adId, offerItems, requestItems) {
-  const ad = (await sql`SELECT * FROM rex_trade_ads WHERE id=${adId}`)[0]
-  if (!ad) throw new Error('Ad not found')
-  if (ad.status !== 'open') throw new Error('Ad is no longer open')
-  if (ad.user_id === fromId) throw new Error("You can't make an offer on your own ad")
-  if (!offerItems.length) throw new Error('Add at least one item to your offer')
-  if (!requestItems.length) throw new Error('Pick at least one item you want')
-  for (const o of [...offerItems, ...requestItems]) {
-    if (o.tag) throw new Error('Offers must be specific items')
-    if (!validItem(ad.game, o.item)) throw new Error(`Unknown item: ${o.item}`)
-    if (!(o.qty > 0)) throw new Error('Quantity must be positive')
-  }
-  for (const r of requestItems) {
-    if (await invQty(ad.user_id, ad.game, r.item) < r.qty) throw new Error(`${ad.username} no longer has ${r.qty}x ${r.item}`)
-  }
-  // Escrow sender's offered items (atomic).
-  const reserved = []
-  for (const o of offerItems) {
-    const ok = await removeItem(fromId, ad.game, o.item, o.qty)
-    if (!ok) { for (const x of reserved) await addItem(fromId, ad.game, x.item, x.qty); throw new Error(`You don't have ${o.qty}x ${o.item}`) }
-    reserved.push(o)
-  }
-  const id = crypto.randomUUID()
-  await sql`
-    INSERT INTO rex_trade_offers (id, ad_id, game, from_id, from_name, to_id, to_name, offer_items, request_items)
-    VALUES (${id},${adId},${ad.game},${fromId},${fromName},${ad.user_id},${ad.username},${JSON.stringify(offerItems)},${JSON.stringify(requestItems)})`
-  return id
-}
-async function createDirectOffer(fromId, fromName, toUsername, game, offerItems, requestItems) {
-  const toUser = (await sql`SELECT * FROM users WHERE LOWER(roblox_username)=LOWER(${toUsername})`)[0]
-  if (!toUser) throw new Error(`User ${toUsername} not found`)
-  if (toUser.id === fromId) throw new Error("You can't send an offer to yourself")
-  if (!offerItems.length) throw new Error('Add at least one item to your offer')
-  if (!requestItems.length) throw new Error('Pick at least one item you want')
-  for (const o of [...offerItems, ...requestItems]) {
-    if (o.tag) throw new Error('Offers must be specific items')
-    if (!validItem(game, o.item)) throw new Error(`Unknown item: ${o.item}`)
-    if (!(o.qty > 0)) throw new Error('Quantity must be positive')
-  }
-  for (const r of requestItems) {
-    if (await invQty(toUser.id, game, r.item) < r.qty) throw new Error(`${toUsername} doesn't have ${r.qty}x ${r.item}`)
-  }
-  const reserved = []
-  for (const o of offerItems) {
-    const ok = await removeItem(fromId, game, o.item, o.qty)
-    if (!ok) { for (const x of reserved) await addItem(fromId, game, x.item, x.qty); throw new Error(`You don't have ${o.qty}x ${o.item}`) }
-    reserved.push(o)
-  }
-  const id = crypto.randomUUID()
-  await sql`
-    INSERT INTO rex_trade_offers (id, ad_id, game, from_id, from_name, to_id, to_name, offer_items, request_items)
-    VALUES (${id},${null},${game},${fromId},${fromName},${toUser.id},${toUser.roblox_username},${JSON.stringify(offerItems)},${JSON.stringify(requestItems)})`
-  return id
-}
-async function acceptOffer(offerId, byId) {
-  const o = (await sql`SELECT * FROM rex_trade_offers WHERE id=${offerId}`)[0]
-  if (!o) throw new Error('Offer not found')
-  if (o.to_id !== byId) throw new Error('Only the recipient can accept this offer')
-  if (o.status !== 'pending') throw new Error('Offer is no longer pending')
-  for (const r of o.request_items) {
-    if (await invQty(o.to_id, o.game, r.item) < r.qty) throw new Error(`You no longer have ${r.qty}x ${r.item}`)
-  }
-  for (const r of o.request_items) { const ok = await removeItem(o.to_id, o.game, r.item, r.qty); if (!ok) throw new Error(`You no longer have ${r.qty}x ${r.item}`) }
-  for (const r of o.request_items) await addItem(o.from_id, o.game, r.item, r.qty)
-  for (const it of o.offer_items) await addItem(o.to_id, o.game, it.item, it.qty)
-  await sql`UPDATE rex_trade_offers SET status='accepted' WHERE id=${offerId}`
-  if (o.ad_id) {
-    // Close the tied ad and release its escrow.
-    const ad = (await sql`SELECT * FROM rex_trade_ads WHERE id=${o.ad_id}`)[0]
-    if (ad && ad.status === 'open') {
-      for (const it of ad.offering) await addItem(ad.user_id, ad.game, it.item, it.qty)
-      await sql`UPDATE rex_trade_ads SET status='completed', buyer_id=${o.from_id}, buyer_name=${o.from_name}, completed_at=NOW() WHERE id=${o.ad_id}`
-    }
-    // Decline sibling offers and release their escrow.
-    const sibs = await sql`SELECT * FROM rex_trade_offers WHERE ad_id=${o.ad_id} AND status='pending' AND id != ${offerId}`
-    for (const s of sibs) { for (const it of s.offer_items) await addItem(s.from_id, s.game, it.item, it.qty); await sql`UPDATE rex_trade_offers SET status='declined' WHERE id=${s.id}` }
-  }
-}
-async function setOfferStatus(offerId, userId, action) {
-  const o = (await sql`SELECT * FROM rex_trade_offers WHERE id=${offerId}`)[0]
-  if (!o) throw new Error('Offer not found')
-  if (o.status !== 'pending') throw new Error('Offer is no longer pending')
-  if (action === 'decline' && o.to_id !== userId) throw new Error('Only the ad owner can decline')
-  if (action === 'cancel' && o.from_id !== userId) throw new Error('Only the sender can cancel')
-  for (const it of o.offer_items) await addItem(o.from_id, o.game, it.item, it.qty)
-  await sql`UPDATE rex_trade_offers SET status=${action === 'cancel' ? 'cancelled' : 'declined'} WHERE id=${offerId}`
-}
+// ── PKCE helpers for Roblox OAuth ─────────────────────────────────────────────
+function base64url(buf) { return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '') }
+function randomToken(bytes = 32) { return base64url(crypto.randomBytes(bytes)) }
+function codeChallenge(verifier) { return base64url(crypto.createHash('sha256').update(verifier).digest()) }
+function redirectTo(res, location) { res.statusCode = 302; res.setHeader('Location', location); res.end(); return res }
 
 // ── Handler ───────────────────────────────────────────────────────────────────
 export default async function handler(req, res) {
@@ -417,68 +192,79 @@ export default async function handler(req, res) {
 
   try {
     await ensureInit()
+    let m
 
-    if (path === '/games' && method === 'GET') {
-      return json({ games: Object.entries(GAMES).map(([id, g]) => ({ id, label: g.label, items: g.items })) })
+    // --- Roblox OAuth (Sign in with Roblox) ---
+    if (path === '/roblox/oauth/start' && method === 'GET') {
+      const clientId = process.env.ROBLOX_OAUTH_CLIENT_ID
+      const redirectUri = process.env.ROBLOX_OAUTH_REDIRECT_URI
+      if (!clientId || !redirectUri) return res.status(500) && json({ error: 'Roblox OAuth is not configured yet' })
+      const state = randomToken(16)
+      const verifier = randomToken(32)
+      const authorizeUrl = new URL(OAUTH_AUTHORIZE_URL)
+      authorizeUrl.searchParams.set('client_id', clientId)
+      authorizeUrl.searchParams.set('redirect_uri', redirectUri)
+      authorizeUrl.searchParams.set('scope', 'openid profile')
+      authorizeUrl.searchParams.set('response_type', 'code')
+      authorizeUrl.searchParams.set('state', state)
+      authorizeUrl.searchParams.set('code_challenge', codeChallenge(verifier))
+      authorizeUrl.searchParams.set('code_challenge_method', 'S256')
+      res.setHeader('Set-Cookie', [setCookie('rex_oauth_state', state, 600), setCookie('rex_oauth_verifier', verifier, 600)])
+      return redirectTo(res, authorizeUrl.toString())
     }
 
-    if (path === '/roblox/challenge' && method === 'POST') {
-      const key = normalizeUsername(req.body?.roblox_username)
-      if (!key) return res.status(400) && json({ error: 'roblox_username required' })
-      const phrase = generatePhrase()
-      await sql`
-        INSERT INTO rex_challenges (roblox_username, phrase, expires_at)
-        VALUES (${key},${phrase},NOW() + INTERVAL '10 minutes')
-        ON CONFLICT (roblox_username) DO UPDATE SET phrase=${phrase}, expires_at=NOW() + INTERVAL '10 minutes'`
-      return json({ phrase })
-    }
+    if (path === '/roblox/oauth/callback' && method === 'GET') {
+      const clearOauthCookies = [setCookie('rex_oauth_state', '', 0), setCookie('rex_oauth_verifier', '', 0)]
+      const cookies = parseCookies(req.headers.cookie || '')
+      const code = url.searchParams.get('code')
+      const state = url.searchParams.get('state')
+      if (!code || !state || state !== cookies.rex_oauth_state || !cookies.rex_oauth_verifier) {
+        res.setHeader('Set-Cookie', clearOauthCookies)
+        return redirectTo(res, '/?error=oauth')
+      }
+      const tokenRes = await fetch(OAUTH_TOKEN_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'authorization_code',
+          code,
+          redirect_uri: process.env.ROBLOX_OAUTH_REDIRECT_URI,
+          client_id: process.env.ROBLOX_OAUTH_CLIENT_ID,
+          client_secret: process.env.ROBLOX_OAUTH_CLIENT_SECRET,
+          code_verifier: cookies.rex_oauth_verifier,
+        }),
+      })
+      if (!tokenRes.ok) { res.setHeader('Set-Cookie', clearOauthCookies); return redirectTo(res, '/?error=oauth') }
+      const tokens = await tokenRes.json()
+      const profileRes = await fetch(OAUTH_USERINFO_URL, { headers: { Authorization: `Bearer ${tokens.access_token}` } })
+      if (!profileRes.ok) { res.setHeader('Set-Cookie', clearOauthCookies); return redirectTo(res, '/?error=oauth') }
+      const profile = await profileRes.json()
+      const robloxId = String(profile.sub)
+      const username = profile.preferred_username || profile.name || `roblox_${robloxId}`
+      const avatarUrl = profile.picture || await fetchAvatarUrl(robloxId)
 
-    if (path === '/roblox/verify' && method === 'POST') {
-      const key = normalizeUsername(req.body?.roblox_username)
-      if (!key) return res.status(400) && json({ error: 'roblox_username required' })
-      const ch = await sql`SELECT phrase FROM rex_challenges WHERE roblox_username=${key} AND expires_at > NOW()`
-      if (!ch[0]) return res.status(400) && json({ error: 'Challenge expired or not found. Start over.' })
-      const robloxId = await fetchRobloxUserId(key)
-      if (!robloxId) return res.status(400) && json({ error: 'Roblox username not found' })
-      const bio = await fetchRobloxBio(robloxId)
-      if (!bio.includes(ch[0].phrase)) return res.status(400) && json({ error: 'Phrase not found in your Roblox bio. Add it and try again.' })
-      await sql`DELETE FROM rex_challenges WHERE roblox_username=${key}`
-      const avatarUrl = await fetchAvatarUrl(robloxId)
-      let u = (await sql`SELECT id, username, role FROM users WHERE roblox_id=${String(robloxId)}`)[0]
+      let u = (await sql`SELECT id, username, role FROM users WHERE roblox_id=${robloxId}`)[0]
       if (!u) {
         const id = crypto.randomUUID()
-        await sql`INSERT INTO users (id, username, roblox_id, avatar_url) VALUES (${id},${key},${String(robloxId)},${avatarUrl}) ON CONFLICT (roblox_id) DO UPDATE SET username=${key}, avatar_url=${avatarUrl}`
+        await sql`INSERT INTO users (id, username, roblox_id, avatar_url) VALUES (${id},${username},${robloxId},${avatarUrl}) ON CONFLICT (roblox_id) DO UPDATE SET username=${username}, avatar_url=${avatarUrl}`
         u = (await sql`SELECT id, username, role FROM users WHERE id=${id}`)[0]
       } else {
-        await sql`UPDATE users SET avatar_url=${avatarUrl} WHERE id=${u.id}`
+        await sql`UPDATE users SET username=${username}, avatar_url=${avatarUrl} WHERE id=${u.id}`
+      }
+      if (ADMIN_USERNAMES.includes(username.toLowerCase()) && u.role !== 'admin') {
+        await sql`UPDATE users SET role='admin' WHERE id=${u.id}`
+        u.role = 'admin'
       }
       const sid = crypto.randomUUID()
       await sql`INSERT INTO sessions (id, user_id) VALUES (${sid}, ${u.id})`
-      res.setHeader('Set-Cookie', setCookie('rex_sid', sid, 60 * 60 * 24 * 30))
-      return json({ user: { id: u.id, username: u.username, role: u.role } })
+      res.setHeader('Set-Cookie', [...clearOauthCookies, setCookie('rex_sid', sid, 60 * 60 * 24 * 30)])
+      return redirectTo(res, '/')
     }
 
     if (path === '/me' && method === 'GET') {
       const u = await sessionUser(req)
       if (!u) return json({ user: null })
-      // Backfill avatar_url for users who logged in before the column was added
-      if (!u.avatar_url && u.roblox_id) {
-        const avatarUrl = await fetchAvatarUrl(u.roblox_id)
-        if (avatarUrl) {
-          await sql`UPDATE users SET avatar_url=${avatarUrl} WHERE id=${u.id}`.catch(() => {})
-          u.avatar_url = avatarUrl
-        }
-      }
       return json({ user: { id: u.id, username: u.username, role: u.role, avatar: u.avatar_url || null } })
-    }
-    if (path === '/avatar' && method === 'GET') {
-      const username = (url.searchParams.get('username') || '').trim()
-      if (!username) return res.status(400) && json({ error: 'username required' })
-      const row = (await sql`SELECT roblox_id FROM users WHERE LOWER(roblox_username)=LOWER(${username})`)[0]
-        || (await sql`SELECT roblox_id FROM users WHERE LOWER(username)=LOWER(${username})`)[0]
-      if (!row?.roblox_id) return json({ url: null })
-      const avatarUrl = await fetchAvatarUrl(row.roblox_id)
-      return json({ url: avatarUrl })
     }
     if (path === '/logout' && method === 'POST') {
       const sid = parseCookies(req.headers.cookie || '').rex_sid
@@ -487,231 +273,162 @@ export default async function handler(req, res) {
       return json({ ok: true })
     }
 
-    if (path === '/inventory' && method === 'GET') {
-      const u = await sessionUser(req)
-      if (!u) return res.status(401) && json({ error: 'Not logged in' })
-      const game = url.searchParams.get('game') || 'growagarden'
-      if (!GAMES[game]) return res.status(400) && json({ error: 'Unknown game' })
-      const other = url.searchParams.get('user')
-      if (other) return json({ game, username: other, items: await invListByUsername(other, game) })
-      return json({ game, items: await invList(u.id, game) })
+    // ============================================================
+    // GAME MARKETPLACE — buy/sell whole Roblox games, USDC via Apirone.
+    // Payment is automatic (Apirone invoice + webhook); order completion is
+    // MANUAL — an admin confirms the Roblox ownership transfer happened and
+    // releases the seller's payout.
+    // ============================================================
+    if (path === '/marketplace/listings' && method === 'GET') {
+      const rows = await sql`SELECT * FROM rex_game_listings WHERE status='active' ORDER BY created_at DESC LIMIT 200`
+      return json({ listings: rows })
     }
-
-    if (path === '/ads' && method === 'GET') {
-      const game = url.searchParams.get('game') || 'growagarden'
-      const u = await sessionUser(req)
-      // Auto-expire stale ads
-      await sql`UPDATE rex_trade_ads SET status='expired' WHERE status='open' AND expires_at IS NOT NULL AND expires_at < NOW()`.catch(() => {})
-      const rows = await sql`
-        SELECT a.*, u.avatar_url FROM rex_trade_ads a
-        LEFT JOIN users u ON u.id=a.user_id
-        WHERE a.game=${game} AND a.status='open' ORDER BY a.created_at DESC LIMIT 100`
-      const ads = rows.map((a) => ({
-        id: a.id, game: a.game, username: a.username, avatar: a.avatar_url || null,
-        offering: a.offering, requesting: a.requesting,
-        note: a.note, offerValue: sumValue(a.game, a.offering), requestValue: sumValue(a.game, a.requesting),
-        mine: u ? a.user_id === u.id : false,
-      }))
-      return json({ ads })
+    if ((m = path.match(/^\/marketplace\/listings\/([^/]+)$/)) && method === 'GET') {
+      const row = (await sql`SELECT * FROM rex_game_listings WHERE id=${m[1]}`)[0]
+      if (!row) return res.status(404) && json({ error: 'Listing not found' })
+      return json({ listing: row })
     }
-    if (path === '/ads' && method === 'POST') {
-      const u = await sessionUser(req)
-      if (!u) return res.status(401) && json({ error: 'Not logged in' })
-      const { game, offering, requesting, note } = req.body || {}
-      if (!GAMES[game]) return res.status(400) && json({ error: 'Unknown game' })
-      const id = await createAd(u.id, u.username, game, offering || [], requesting || [], note)
-      return json({ ok: true, id })
-    }
-    let m
-    if ((m = path.match(/^\/ads\/([^/]+)\/accept$/)) && method === 'POST') {
+    if (path === '/marketplace/listings' && method === 'POST') {
       const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
-      await acceptAd(m[1], u); return json({ ok: true })
-    }
-    if ((m = path.match(/^\/ads\/([^/]+)\/cancel$/)) && method === 'POST') {
-      const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
-      await cancelAd(m[1], u.id); return json({ ok: true })
-    }
-
-    // --- Counter-offers ---
-    if ((m = path.match(/^\/ads\/([^/]+)\/offer$/)) && method === 'POST') {
-      const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
-      const id = await createOffer(u.id, u.username, m[1], req.body?.offerItems || [], req.body?.requestItems || [])
-      return json({ ok: true, id })
-    }
-    if (path === '/offers/direct' && method === 'POST') {
-      const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
-      const { toUsername, offerItems, requestItems, game } = req.body || {}
-      const id = await createDirectOffer(u.id, u.username, toUsername, game || 'growagarden', offerItems || [], requestItems || [])
-      return json({ ok: true, id })
-    }
-    if (path === '/offers' && method === 'GET') {
-      const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
-      const box = url.searchParams.get('box') || 'incoming'
-      const rows = box === 'outgoing'
-        ? await sql`SELECT * FROM rex_trade_offers WHERE status='pending' AND from_id=${u.id} ORDER BY created_at DESC LIMIT 100`
-        : await sql`SELECT * FROM rex_trade_offers WHERE status='pending' AND to_id=${u.id} ORDER BY created_at DESC LIMIT 100`
-      return json({ offers: rows.map((o) => ({ id: o.id, adId: o.ad_id, game: o.game, fromName: o.from_name, toName: o.to_name, offerItems: o.offer_items, requestItems: o.request_items })) })
-    }
-    if ((m = path.match(/^\/offers\/([^/]+)\/accept$/)) && method === 'POST') {
-      const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
-      await acceptOffer(m[1], u.id); return json({ ok: true })
-    }
-    if ((m = path.match(/^\/offers\/([^/]+)\/(decline|cancel)$/)) && method === 'POST') {
-      const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
-      await setOfferStatus(m[1], u.id, m[2]); return json({ ok: true })
-    }
-
-    if (path === '/history' && method === 'GET') {
-      const game = url.searchParams.get('game') || 'growagarden'
-      const box = url.searchParams.get('box') || 'all'
-      const search = (url.searchParams.get('search') || '').trim()
-      const pat = search ? `%${search}%` : '%' // ILIKE '%' matches everything
-      const PAGE = 10
-      const u = await sessionUser(req)
-      const mine = box === 'mine' && u
-      const name = mine ? u.username : null
-      const cnt = mine
-        ? await sql`SELECT COUNT(*)::int AS n FROM rex_trade_ads WHERE game=${game} AND status='completed' AND (username=${name} OR buyer_name=${name}) AND (offering::text ILIKE ${pat} OR requesting::text ILIKE ${pat})`
-        : await sql`SELECT COUNT(*)::int AS n FROM rex_trade_ads WHERE game=${game} AND status='completed' AND (offering::text ILIKE ${pat} OR requesting::text ILIKE ${pat})`
-      const totalPages = Math.max(1, Math.ceil((cnt[0]?.n || 0) / PAGE))
-      const page = Math.min(Math.max(1, parseInt(url.searchParams.get('page')) || 1), totalPages)
-      const offset = (page - 1) * PAGE
-      const rows = mine
-        ? await sql`SELECT username, buyer_name, offering, requesting, completed_at FROM rex_trade_ads WHERE game=${game} AND status='completed' AND (username=${name} OR buyer_name=${name}) AND (offering::text ILIKE ${pat} OR requesting::text ILIKE ${pat}) ORDER BY completed_at DESC LIMIT ${PAGE} OFFSET ${offset}`
-        : await sql`SELECT username, buyer_name, offering, requesting, completed_at FROM rex_trade_ads WHERE game=${game} AND status='completed' AND (offering::text ILIKE ${pat} OR requesting::text ILIKE ${pat}) ORDER BY completed_at DESC LIMIT ${PAGE} OFFSET ${offset}`
-      return json({ trades: rows.map((t) => ({ seller: t.username, buyer: t.buyer_name, offering: t.offering, requesting: t.requesting, completedAt: t.completed_at })), page, totalPages })
-    }
-
-    // --- Global chat ---
-    if (path === '/chat/global' && method === 'GET') {
-      const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
-      const before = url.searchParams.get('before') // ISO timestamp for pagination
-      const rows = before
-        ? await sql`SELECT m.id, m.username, m.message, m.created_at, u.avatar_url FROM rex_chat_messages m LEFT JOIN users u ON u.id=m.user_id WHERE m.created_at < ${before} ORDER BY m.created_at DESC LIMIT 50`
-        : await sql`SELECT m.id, m.username, m.message, m.created_at, u.avatar_url FROM rex_chat_messages m LEFT JOIN users u ON u.id=m.user_id ORDER BY m.created_at DESC LIMIT 50`
-      return json({ messages: rows.reverse() })
-    }
-    if (path === '/chat/global' && method === 'POST') {
-      const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
-      const msg = (req.body?.message || '').trim().slice(0, 200)
-      if (!msg) return res.status(400) && json({ error: 'Message cannot be empty' })
+      if (!u.roblox_id) return res.status(400) && json({ error: 'Connect your Roblox account first' })
+      const { groupId, placeId, title, description, priceUsdc } = req.body || {}
+      if (!groupId || !placeId) return res.status(400) && json({ error: 'groupId and placeId are required' })
+      if (!title || !(Number(priceUsdc) > 0)) return res.status(400) && json({ error: 'Title and a positive price are required' })
+      const groupInfo = await fetchGroupInfo(groupId)
+      if (!groupInfo) return res.status(400) && json({ error: 'Could not look up that Roblox group' })
+      if (groupInfo.ownerId !== u.roblox_id) return res.status(400) && json({ error: 'You are not the owner of that group on Roblox — only the group owner can list it. (Game sales here are done via group-ownership transfer, so the game must be group-owned.)' })
+      const universeId = await fetchUniverseFromPlace(placeId)
+      if (!universeId) return res.status(400) && json({ error: 'Could not look up that place ID' })
+      const stats = await fetchGameStats(universeId)
+      const thumb = await fetchGameThumbnail(universeId)
       const id = crypto.randomUUID()
-      await sql`INSERT INTO rex_chat_messages (id, user_id, username, message) VALUES (${id},${u.id},${u.username},${msg})`
+      await sql`
+        INSERT INTO rex_game_listings (id, seller_id, seller_username, group_id, place_id, universe_id, title, description, price_usdc, ccu, visits, favorites, thumbnail_url)
+        VALUES (${id},${u.id},${u.username},${String(groupId)},${String(placeId)},${universeId},${title.slice(0,80)},${(description||'').slice(0,2000)},${Number(priceUsdc)},${stats?.ccu||0},${stats?.visits||0},${stats?.favorites||0},${thumb})`
       return json({ ok: true, id })
     }
-
-    // --- DMs ---
-    if (path === '/chat/dms' && method === 'GET') {
+    if ((m = path.match(/^\/marketplace\/listings\/([^/]+)\/cancel$/)) && method === 'POST') {
       const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
-      // Get latest message per conversation partner
-      const rows = await sql`
-        SELECT DISTINCT ON (t.partner_id)
-          t.partner_id, t.partner_name, t.message, t.created_at, t.read, t.from_id, u.avatar_url
-        FROM (
-          SELECT to_id AS partner_id, to_name AS partner_name, message, created_at, read, from_id
-          FROM rex_dm_messages WHERE from_id=${u.id}
-          UNION ALL
-          SELECT from_id AS partner_id, from_name AS partner_name, message, created_at, read, from_id
-          FROM rex_dm_messages WHERE to_id=${u.id}
-        ) t
-        LEFT JOIN users u ON u.id=t.partner_id
-        ORDER BY t.partner_id, t.created_at DESC`
-      const unread = await sql`SELECT COUNT(*)::int AS n FROM rex_dm_messages WHERE to_id=${u.id} AND read=false`
-      return json({ conversations: rows, unreadTotal: unread[0]?.n || 0 })
-    }
-    if ((m = path.match(/^\/chat\/dms\/([^/]+)$/)) && method === 'GET') {
-      const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
-      const otherId = m[1]
-      const rows = await sql`
-        SELECT id, from_id, from_name, to_id, to_name, message, created_at, read
-        FROM rex_dm_messages
-        WHERE (from_id=${u.id} AND to_id=${otherId}) OR (from_id=${otherId} AND to_id=${u.id})
-        ORDER BY created_at ASC LIMIT 200`
-      // Mark received messages as read
-      await sql`UPDATE rex_dm_messages SET read=true WHERE to_id=${u.id} AND from_id=${otherId} AND read=false`
-      return json({ messages: rows })
-    }
-    if ((m = path.match(/^\/chat\/dms\/([^/]+)$/)) && method === 'POST') {
-      const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
-      const otherId = m[1]
-      const msg = (req.body?.message || '').trim().slice(0, 500)
-      if (!msg) return res.status(400) && json({ error: 'Message cannot be empty' })
-      const other = (await sql`SELECT id, username FROM users WHERE id=${otherId}`)[0]
-      if (!other) return res.status(400) && json({ error: 'User not found' })
-      const id = crypto.randomUUID()
-      await sql`INSERT INTO rex_dm_messages (id, from_id, from_name, to_id, to_name, message)
-        VALUES (${id},${u.id},${u.username},${other.id},${other.username},${msg})`
-      return json({ ok: true, id })
-    }
-    if (path === '/chat/unread' && method === 'GET') {
-      const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
-      const r = await sql`SELECT COUNT(*)::int AS n FROM rex_dm_messages WHERE to_id=${u.id} AND read=false`
-      return json({ unread: r[0]?.n || 0 })
-    }
-    // Look up a user's id by username (for opening DMs)
-    if (path === '/users/lookup' && method === 'GET') {
-      const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
-      const username = (url.searchParams.get('username') || '').toLowerCase()
-      const row = (await sql`SELECT id, username FROM users WHERE LOWER(username)=${username}`)[0]
-      if (!row) return res.status(404) && json({ error: 'User not found' })
-      return json({ user: row })
-    }
-    if ((m = path.match(/^\/users\/([^/]+)\/thumbsup$/)) && method === 'POST') {
-      const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
-      const target = (await sql`SELECT id FROM users WHERE LOWER(username)=LOWER(${m[1]})`)[0]
-      if (!target) return res.status(404) && json({ error: 'User not found' })
-      if (target.id === u.id) return res.status(400) && json({ error: "Can't thumb-up yourself" })
-      await sql`INSERT INTO rex_reputation (from_id, to_id) VALUES (${u.id}, ${target.id}) ON CONFLICT DO NOTHING`
-      const count = (await sql`SELECT COUNT(*) FROM rex_reputation WHERE to_id=${target.id}`)[0].count
-      return json({ ok: true, thumbsUp: Number(count), hasThumbedUp: true })
-    }
-    if (path === '/users/profile' && method === 'GET') {
-      const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
-      const username = (url.searchParams.get('username') || '').trim()
-      const game = url.searchParams.get('game') || 'growagarden'
-      const row = (await sql`SELECT id, username, roblox_id FROM users WHERE LOWER(username)=LOWER(${username})`)[0]
-      if (!row) return res.status(404) && json({ error: 'User not found' })
-      const [adsRows, invRows, countRow, repRow, myVote] = await Promise.all([
-        sql`SELECT a.*, ${row.avatar_url || null} AS avatar_url FROM rex_trade_ads a WHERE a.user_id=${row.id} AND a.game=${game} AND a.status='open' AND (a.expires_at IS NULL OR a.expires_at > NOW()) ORDER BY a.created_at DESC LIMIT 20`,
-        sql`SELECT item, qty FROM rex_inventories WHERE user_id=${row.id} AND game=${game} AND qty > 0 ORDER BY item`,
-        sql`SELECT COUNT(*) FROM rex_trade_ads WHERE game=${game} AND status='completed' AND (user_id=${row.id} OR buyer_id=${row.id})`,
-        sql`SELECT COUNT(*) FROM rex_reputation WHERE to_id=${row.id}`,
-        sql`SELECT 1 FROM rex_reputation WHERE from_id=${u.id} AND to_id=${row.id}`,
-      ])
-      const ads = adsRows.map((a) => ({ id: a.id, username: a.username, avatar: a.avatar_url || null, note: a.note, offering: a.offering, requesting: a.requesting, mine: a.user_id === u.id }))
-      const inventory = invRows.map((r) => ({ item: r.item, qty: r.qty, rarity: '' }))
-      const avatar = row.roblox_id ? await fetchAvatarUrl(row.roblox_id) : null
-      return json({ username: row.username, targetId: row.id, avatar, stats: { completedTrades: Number(countRow[0].count), thumbsUp: Number(repRow[0].count), hasThumbedUp: myVote.length > 0 }, ads, inventory })
+      const row = (await sql`SELECT * FROM rex_game_listings WHERE id=${m[1]}`)[0]
+      if (!row) return res.status(404) && json({ error: 'Listing not found' })
+      if (row.seller_id !== u.id) return res.status(400) && json({ error: 'Not your listing' })
+      if (row.status !== 'active') return res.status(400) && json({ error: 'Listing is not active' })
+      await sql`UPDATE rex_game_listings SET status='removed' WHERE id=${m[1]}`
+      return json({ ok: true })
     }
 
-    // --- Deposit info ---
-    if (path === '/deposit/info' && method === 'GET') {
+    if ((m = path.match(/^\/marketplace\/listings\/([^/]+)\/buy$/)) && method === 'POST') {
       const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
-      const game = url.searchParams.get('game') || 'growagarden'
-      return json({ mailbox: MAILBOX[game] || 'RobloxExchangeGAG', game })
-    }
-
-    // --- Withdrawals ---
-    if (path === '/withdraw/request' && method === 'POST') {
-      const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
-      const { game, items } = req.body || {}
-      if (!GAMES[game]) return res.status(400) && json({ error: 'Unknown game' })
-      if (!Array.isArray(items) || !items.length) return res.status(400) && json({ error: 'No items selected' })
-      if (items.length > 20) return res.status(400) && json({ error: 'Max 20 items per withdrawal' })
-      for (const it of items) {
-        if (!validItem(game, it.item)) throw new Error(`Unknown item: ${it.item}`)
-        if (!it.qty || it.qty < 1) throw new Error(`Invalid qty for ${it.item}`)
-        if (await invQty(u.id, game, it.item) < it.qty) throw new Error(`You don't have ${it.qty}x ${it.item}`)
+      if (!u.roblox_id) return res.status(400) && json({ error: 'Connect your Roblox account first' })
+      const listing = (await sql`SELECT * FROM rex_game_listings WHERE id=${m[1]}`)[0]
+      if (!listing) return res.status(404) && json({ error: 'Listing not found' })
+      if (listing.status !== 'active') return res.status(400) && json({ error: 'This listing is no longer available' })
+      if (listing.seller_id === u.id) return res.status(400) && json({ error: "You can't buy your own listing" })
+      const orderId = crypto.randomUUID()
+      let invoiceId = null, payAddress = null
+      try {
+        const inv = await createInvoice({ amountUsdc: listing.price_usdc, orderId, callbackUrl: `https://${req.headers.host}/api/marketplace/apirone/callback` })
+        invoiceId = inv.invoiceId; payAddress = inv.address
+      } catch (e) {
+        return res.status(500) && json({ error: `Payment provider unavailable: ${e.message}` })
       }
-      for (const it of items) await removeItem(u.id, game, it.item, it.qty)
-      const id = crypto.randomUUID()
-      await sql`INSERT INTO rex_pending_withdrawals (id, game, user_id, username, items) VALUES (${id},${game},${u.id},${u.username},${JSON.stringify(items)})`
-      return json({ ok: true, id })
+      await sql`UPDATE rex_game_listings SET status='pending_sale' WHERE id=${listing.id}`
+      await sql`
+        INSERT INTO rex_game_orders (id, listing_id, buyer_id, buyer_username, buyer_roblox_id, seller_id, seller_username, price_usdc, invoice_id, pay_address)
+        VALUES (${orderId},${listing.id},${u.id},${u.username},${u.roblox_id},${listing.seller_id},${listing.seller_username},${listing.price_usdc},${invoiceId},${payAddress})`
+      return json({ ok: true, id: orderId, payAddress, amount: listing.price_usdc })
     }
-    if (path === '/withdraw/pending' && method === 'GET') {
+
+    if ((m = path.match(/^\/marketplace\/orders\/([^/]+)$/)) && method === 'GET') {
       const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
-      const rows = await sql`SELECT id, game, items, created_at FROM rex_pending_withdrawals WHERE user_id=${u.id} AND status='pending' ORDER BY created_at DESC`
-      return json({ withdrawals: rows })
+      const o = (await sql`SELECT * FROM rex_game_orders WHERE id=${m[1]}`)[0]
+      if (!o) return res.status(404) && json({ error: 'Order not found' })
+      if (![o.buyer_id, o.seller_id].includes(u.id) && !isAdmin(u)) return res.status(403) && json({ error: 'Not your order' })
+      return json({ order: o })
+    }
+    if ((m = path.match(/^\/marketplace\/orders\/([^/]+)\/check-payment$/)) && method === 'POST') {
+      const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
+      const o = (await sql`SELECT * FROM rex_game_orders WHERE id=${m[1]}`)[0]
+      if (!o) return res.status(404) && json({ error: 'Order not found' })
+      if (![o.buyer_id, o.seller_id].includes(u.id) && !isAdmin(u)) return res.status(403) && json({ error: 'Not your order' })
+      if (o.status !== 'awaiting_payment') return json({ order: o })
+      if (!o.invoice_id) return res.status(400) && json({ error: 'No invoice on this order' })
+      const inv = await getInvoiceStatus(o.invoice_id)
+      if (['paid', 'completed', 'overpaid'].includes(inv.status)) {
+        await sql`UPDATE rex_game_orders SET status='paid', paid_at=NOW(), transfer_deadline=NOW() + INTERVAL '7 days' WHERE id=${o.id}`
+        return json({ order: (await sql`SELECT * FROM rex_game_orders WHERE id=${o.id}`)[0] })
+      }
+      return json({ order: o, invoiceStatus: inv.status })
+    }
+    if ((m = path.match(/^\/marketplace\/orders\/([^/]+)\/cancel$/)) && method === 'POST') {
+      const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
+      const o = (await sql`SELECT * FROM rex_game_orders WHERE id=${m[1]}`)[0]
+      if (!o) return res.status(404) && json({ error: 'Order not found' })
+      if (o.buyer_id !== u.id) return res.status(400) && json({ error: 'Only the buyer can cancel' })
+      if (o.status !== 'awaiting_payment') return res.status(400) && json({ error: 'This order can no longer be cancelled — contact support if you already paid' })
+      await sql`UPDATE rex_game_orders SET status='cancelled', cancelled_at=NOW() WHERE id=${o.id}`
+      await sql`UPDATE rex_game_listings SET status='active' WHERE id=${o.listing_id} AND status='pending_sale'`
+      return json({ ok: true })
+    }
+    if (path === '/marketplace/orders' && method === 'GET') {
+      const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
+      const box = url.searchParams.get('box') || 'buying'
+      const rows = box === 'selling'
+        ? await sql`SELECT * FROM rex_game_orders WHERE seller_id=${u.id} ORDER BY created_at DESC LIMIT 100`
+        : await sql`SELECT * FROM rex_game_orders WHERE buyer_id=${u.id} ORDER BY created_at DESC LIMIT 100`
+      return json({ orders: rows })
+    }
+
+    // --- Admin: manual finalization (confirms the Roblox transfer, releases seller payout) ---
+    if (path === '/marketplace/admin/orders' && method === 'GET') {
+      const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
+      if (!isAdmin(u)) return res.status(403) && json({ error: 'Admin only' })
+      const rows = await sql`SELECT * FROM rex_game_orders WHERE status='paid' ORDER BY paid_at ASC`
+      return json({ orders: rows })
+    }
+    if ((m = path.match(/^\/marketplace\/orders\/([^/]+)\/finalize$/)) && method === 'POST') {
+      const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
+      if (!isAdmin(u)) return res.status(403) && json({ error: 'Admin only' })
+      const o = (await sql`SELECT * FROM rex_game_orders WHERE id=${m[1]}`)[0]
+      if (!o) return res.status(404) && json({ error: 'Order not found' })
+      if (o.status !== 'paid') return res.status(400) && json({ error: 'Order must be paid before it can be finalized' })
+      await sql`UPDATE rex_game_orders SET status='completed', completed_at=NOW() WHERE id=${o.id}`
+      await sql`UPDATE rex_game_listings SET status='sold' WHERE id=${o.listing_id}`
+      const ledgerId = crypto.randomUUID()
+      await sql`INSERT INTO rex_wallet_ledger (id, user_id, kind, amount_usdc, order_id, status) VALUES (${ledgerId},${o.seller_id},'sale',${o.price_usdc},${o.id},'completed')`
+      return json({ ok: true })
+    }
+
+    // --- Apirone webhook (public — no session) ---
+    if (path === '/marketplace/apirone/callback' && method === 'POST') {
+      const data = req.body || {}
+      const invoiceId = data.invoice || data['invoice-id'] || data.id
+      const status = data.status
+      if (invoiceId && ['paid', 'completed', 'overpaid'].includes(status)) {
+        await sql`
+          UPDATE rex_game_orders SET status='paid', paid_at=NOW(), transfer_deadline=NOW() + INTERVAL '7 days'
+          WHERE invoice_id=${invoiceId} AND status='awaiting_payment'`
+      }
+      res.setHeader('Content-Type', 'text/plain'); res.end('ok'); return res
+    }
+
+    // --- Wallet ---
+    if (path === '/marketplace/wallet' && method === 'GET') {
+      const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
+      const ledger = await sql`SELECT * FROM rex_wallet_ledger WHERE user_id=${u.id} ORDER BY created_at DESC LIMIT 200`
+      const balance = ledger.reduce((s, l) => s + (l.kind === 'sale' && l.status === 'completed' ? Number(l.amount_usdc) : (l.kind === 'withdrawal' && l.status !== 'failed' ? -Number(l.amount_usdc) : 0)), 0)
+      return json({ balance, ledger })
+    }
+    if (path === '/marketplace/wallet/withdraw' && method === 'POST') {
+      const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
+      const { amount, toAddress } = req.body || {}
+      if (!(Number(amount) > 0) || !toAddress) return res.status(400) && json({ error: 'Amount and destination address are required' })
+      const ledger = await sql`SELECT * FROM rex_wallet_ledger WHERE user_id=${u.id}`
+      const balance = ledger.reduce((s, l) => s + (l.kind === 'sale' && l.status === 'completed' ? Number(l.amount_usdc) : (l.kind === 'withdrawal' && l.status !== 'failed' ? -Number(l.amount_usdc) : 0)), 0)
+      if (Number(amount) > balance) return res.status(400) && json({ error: `Amount exceeds your balance ($${balance.toFixed(2)})` })
+      const id = crypto.randomUUID()
+      await sql`INSERT INTO rex_wallet_ledger (id, user_id, kind, amount_usdc, to_address, status) VALUES (${id},${u.id},'withdrawal',${amount},${toAddress},'pending')`
+      return json({ ok: true, id })
     }
 
     return res.status(404) && json({ error: `No route: ${method} ${path}` })
