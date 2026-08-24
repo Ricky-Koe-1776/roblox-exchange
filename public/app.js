@@ -92,6 +92,8 @@ function header() {
     const btn = el('<button class="btn ghost" style="margin-left:12px">Logout</button>')
     btn.onclick = async () => { await api.post('/api/logout'); state.user = null; render() }
     ua.appendChild(btn)
+  } else {
+    ua.appendChild(el('<a class="btn" href="/api/roblox/oauth/start">Sign in with Roblox</a>'))
   }
   return h
 }
@@ -111,17 +113,67 @@ function tabs() {
 
 function loginView() {
   const err = new URLSearchParams(location.search).get('error') === 'oauth'
-  const v = el(`<div class="wrap">
-    <div class="hero">
-      <h1>Buy and sell Roblox games, safely.</h1>
-      <p>Every listing is ownership-verified on Roblox, and every payout is held until the game is actually transferred.</p>
-    </div>
-    <div class="card login">
+  const v = el('<div class="wrap"></div>')
+
+  v.appendChild(el(`<div class="hero">
+    <h1>The marketplace for Roblox game acquisitions.</h1>
+    <p>Buy and sell whole Roblox games. Every listing is ownership-verified against Roblox's own records, and every payment sits in USDC escrow until the transfer is confirmed — the seller never gets paid upfront.</p>
+    <div class="hero-ctas">
       <a class="btn" href="/api/roblox/oauth/start">Sign in with Roblox</a>
-      ${err ? '<p class="fine" style="color:var(--danger)">Sign-in failed — please try again.</p>' : ''}
-      <p class="fine">We use Roblox's own sign-in — no password, ever.</p>
+      <a class="btn ghost" href="#listings">Browse Listings</a>
     </div>
-  </div>`)
+    ${err ? '<p class="fine" style="color:var(--danger);margin-top:14px">Sign-in failed — please try again.</p>' : ''}
+  </div>`))
+
+  v.appendChild(el(`<div class="trust-row">
+    <div class="trust-item">
+      <div class="trust-title">Ownership Verified</div>
+      <div class="trust-sub">Every seller is checked against Roblox's own group-ownership records before a listing goes live.</div>
+    </div>
+    <div class="trust-item">
+      <div class="trust-title">USDC Escrow</div>
+      <div class="trust-sub">Your payment is held the moment you pay — never sent to the seller until the game is actually transferred.</div>
+    </div>
+    <div class="trust-item">
+      <div class="trust-title">Manually Verified Transfers</div>
+      <div class="trust-sub">A real person confirms the Roblox ownership change before any payout is released — not an automated guess.</div>
+    </div>
+  </div>`))
+
+  v.appendChild(el('<h2 class="section-h">How it works</h2>'))
+  const steps = el('<div class="hiw-steps"></div>')
+  ;[
+    ['1', 'Sign in with Roblox', "Connect instantly with Roblox's own login — no password, ever."],
+    ['2', 'Buy with USDC', 'Your payment is held in escrow the moment you pay, not sent to the seller.'],
+    ['3', 'Get the game', 'Once the Roblox ownership transfer is verified, the deal is done and funds release.'],
+  ].forEach(([n, t, s]) => steps.appendChild(el(`<div class="hiw-step"><div class="hiw-num">${n}</div><div><div class="hiw-title">${t}</div><div class="hiw-sub">${s}</div></div></div>`)))
+  v.appendChild(steps)
+
+  v.appendChild(el('<h2 class="section-h" id="listings">Recently listed</h2>'))
+  if (!state.mktListings.length) {
+    v.appendChild(el('<div class="empty">No games listed yet — sign in to be the first to sell one.</div>'))
+  } else {
+    const grid = el('<div class="listing-grid"></div>')
+    state.mktListings.slice(0, 6).forEach((l) => {
+      const card = el(`<div class="listing-card">
+        ${l.thumbnail_url ? `<img class="listing-thumb" src="${l.thumbnail_url}" onerror="this.style.display='none'">` : '<div class="listing-thumb-ph"></div>'}
+        <div class="listing-body">
+          <div class="listing-title">${escHtml(l.title)}</div>
+          <div class="listing-price">${fmtUsd(l.price_usdc)}</div>
+          <div class="listing-stats"><span>${l.ccu} CCU</span><span>${Number(l.visits).toLocaleString()} visits</span><span>${l.favorites} favs</span></div>
+        </div>
+      </div>`)
+      card.onclick = () => { location.href = '/api/roblox/oauth/start' }
+      grid.appendChild(card)
+    })
+    v.appendChild(grid)
+    v.appendChild(el('<p class="fine" style="text-align:center;margin-top:14px">Sign in to view full details or buy.</p>'))
+  }
+
+  v.appendChild(el(`<div class="card login" style="margin:40px auto 60px">
+    <a class="btn" href="/api/roblox/oauth/start">Sign in with Roblox</a>
+    <p class="fine">We use Roblox's own sign-in — no password, ever.</p>
+  </div>`))
   return v
 }
 
@@ -391,7 +443,8 @@ function adminView() {
 // ── Boot ──────────────────────────────────────────────────────────────────────
 async function boot() {
   state.user = (await api.get('/api/me')).user
-  if (state.user) await refresh()
-  else render()
+  if (state.user) { await refresh(); return }
+  state.mktListings = (await api.get('/api/marketplace/listings')).listings
+  render()
 }
 boot()
