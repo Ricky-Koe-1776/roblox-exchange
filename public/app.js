@@ -5,7 +5,7 @@ const state = {
   user: null,
   listings: [],
   listingsLoaded: false,
-  market: { q: '', price: 'all', sort: 'playing', shown: 40 },
+  market: { q: '', price: 'all', sort: 'playing', shown: 40, view: 'grid' },
   ordersBox: 'buying',
   signin: { username: '', phrase: '', busy: false },
 }
@@ -53,6 +53,7 @@ function toast(msg, kind = 'ok') {
 const thumb = (l, cls = '') => l.thumbnail_url
   ? `<img class="${cls}" src="${esc(l.thumbnail_url)}" alt="" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'ph'}))">`
   : '<div class="ph"></div>'
+const HOUSE_ID = 'house-roblox-exchange'
 const statusLabel = { awaiting_payment: 'Awaiting payment', paid: 'Paid, transfer pending', completed: 'Completed', cancelled: 'Cancelled', refunded: 'Refunded' }
 const searchIcon = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>'
 
@@ -130,6 +131,7 @@ function marketView() {
   const players = L.reduce((s, l) => s + Number(l.ccu || 0), 0)
   const prices = L.map((l) => Number(l.price_usdc)).sort((a, b) => a - b)
   const median = prices.length ? prices[Math.floor(prices.length / 2)] : 0
+  const top = [...L].sort((a, b) => Number(b.ccu || 0) - Number(a.ccu || 0)).slice(0, 4)
 
   const v = el('<main></main>')
   v.appendChild(el(`<div class="wrap"><section class="hero">
@@ -141,13 +143,16 @@ function marketView() {
         <a class="btn go lg" href="#market">Browse ${L.length ? L.length.toLocaleString() + ' ' : ''}games</a>
         <a class="btn quiet lg" href="#/sell">Sell your game</a>
       </div>
+      <div class="statbar">
+        <div><span class="v">${L.length.toLocaleString()}</span><span class="k">games for sale</span></div>
+        <div><span class="v">${players.toLocaleString()}</span><span class="k">playing right now</span></div>
+        <div><span class="v">${usd(median)}</span><span class="k">median asking price</span></div>
+      </div>
     </div>
-    <aside class="snapshot" aria-label="Market snapshot">
-      <div class="snapshot-head"><span>Market right now</span><span class="muted num">${new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span></div>
-      <div class="snapshot-row"><span class="k">Games for sale</span><span class="v">${L.length.toLocaleString()}</span></div>
-      <div class="snapshot-row"><span class="k">Playing across all listings</span><span class="v">${players.toLocaleString()}</span></div>
-      <div class="snapshot-row"><span class="k">Median asking price</span><span class="v">${usd(median)}</span></div>
-    </aside>
+    <div class="featured" aria-label="Most played games for sale">${top.map((l) => `<a class="feat" href="#/game/${encodeURIComponent(l.id)}">
+      ${thumb(l)}<span class="feat-tag"><i></i>${compact(l.ccu)} playing</span>
+      <div class="feat-body"><div class="feat-title">${esc(l.title)}</div><div class="feat-meta"><span>${compact(l.visits)} visits</span><b>${usd(l.price_usdc)}</b></div></div>
+    </a>`).join('')}</div>
   </section>
   <section class="process" aria-label="How buying works">
     <div><span class="n">01</span><b>Pick a game</b><p>Compare players, visits and favorites pulled from Roblox, then open the listing.</p></div>
@@ -158,6 +163,7 @@ function marketView() {
   const sec = el(`<section class="wrap" id="market" style="padding-bottom:72px"></section>`)
   sec.appendChild(el(`<div class="market-head"><h2 class="section-title">Games for sale</h2><span class="count" id="count"></span></div>`))
   const controls = el(`<div class="controls">
+    <div class="view-toggle" role="group" aria-label="View"><button data-v="grid" class="${state.market.view === 'grid' ? 'on' : ''}">Grid</button><button data-v="list" class="${state.market.view === 'list' ? 'on' : ''}">List</button></div>
     <label class="search"><span class="sr">Search games</span>${searchIcon}<input class="input" id="q" type="search" placeholder="Search by game title" value="${esc(state.market.q)}"></label>
     <select class="input" id="sort" aria-label="Sort">${Object.entries(SORTS).map(([k, [t]]) => `<option value="${k}" ${state.market.sort === k ? 'selected' : ''}>${t}</option>`).join('')}</select>
   </div>`)
@@ -177,6 +183,18 @@ function marketView() {
     if (!rows.length) {
       tableWrap.appendChild(el(`<div class="table"><div class="empty"><b>No games match.</b>${state.listings.length ? 'Try a different search or price range.' : 'Nothing is listed yet.'}</div></div>`))
       return
+    }
+    if (state.market.view === 'grid') {
+      const g = el('<div class="grid"></div>')
+      rows.slice(0, state.market.shown).forEach((l) => {
+        g.appendChild(el(`<a class="card" href="#/game/${encodeURIComponent(l.id)}">
+          <div class="card-img">${thumb(l)}${l.ccu ? `<span class="feat-tag"><i></i>${compact(l.ccu)}</span>` : ''}</div>
+          <div class="card-body"><div class="card-title">${esc(l.title)}</div>
+            <div class="card-foot"><span class="card-price">${usd(l.price_usdc)}</span><span class="card-stats">${compact(l.visits)} visits</span></div></div>
+        </a>`))
+      })
+      tableWrap.appendChild(g)
+      return addMore(rows)
     }
     const t = el(`<div class="table" role="table">
       <div class="trow th" role="row">
@@ -201,12 +219,23 @@ function marketView() {
       }
     })
     tableWrap.appendChild(t)
+    addMore(rows)
+  }
+  function addMore(rows) {
     if (rows.length > state.market.shown) {
       const more = el(`<div class="more"><button class="btn quiet">Show more (${(rows.length - state.market.shown).toLocaleString()} left)</button></div>`)
       more.querySelector('button').onclick = () => { state.market.shown += 40; drawTable() }
       tableWrap.appendChild(more)
     }
   }
+  controls.querySelectorAll('.view-toggle button').forEach((b) => {
+    b.onclick = () => {
+      state.market.view = b.dataset.v
+      try { localStorage.setItem('rex_view', b.dataset.v) } catch {}
+      controls.querySelectorAll('.view-toggle button').forEach((x) => x.classList.toggle('on', x === b))
+      drawTable()
+    }
+  })
   controls.querySelector('#q').oninput = (e) => { state.market.q = e.target.value; state.market.shown = 40; drawTable() }
   controls.querySelector('#sort').onchange = (e) => { state.market.sort = e.target.value; drawTable() }
   chips.querySelectorAll('.chip').forEach((c) => {
@@ -250,7 +279,7 @@ function gameView(l) {
 
   const buy = el(`<aside class="panel buy">
     <div class="buy-price">${usd(l.price_usdc)}</div>
-    <div class="buy-cur">Paid in USDC · listed by ${esc(l.seller_username)}</div>
+    <div class="buy-cur">Paid in USDC${l.seller_id === HOUSE_ID ? '' : ` · listed by ${esc(l.seller_username)}`}</div>
     <div class="buy-action"></div>
     <ol class="steps">
       <li><div><b>Pay the exact amount</b>You get a USDC address for this order.</div></li>
@@ -286,6 +315,15 @@ function gameView(l) {
   }
   grid.appendChild(buy)
   w.appendChild(grid)
+  const more = state.listings.filter((x) => x.id !== l.id).sort((a, b) => Number(b.ccu || 0) - Number(a.ccu || 0)).slice(0, 6)
+  if (more.length) {
+    w.appendChild(el('<h2 class="section-title" style="margin:56px 0 18px">More games for sale</h2>'))
+    w.appendChild(el(`<div class="grid">${more.map((m) => `<a class="card" href="#/game/${encodeURIComponent(m.id)}">
+      <div class="card-img">${thumb(m)}${Number(m.ccu) ? `<span class="feat-tag"><i></i>${compact(m.ccu)}</span>` : ''}</div>
+      <div class="card-body"><div class="card-title">${esc(m.title)}</div>
+        <div class="card-foot"><span class="card-price">${usd(m.price_usdc)}</span><span class="card-stats">${compact(m.visits)} visits</span></div></div>
+    </a>`).join('')}</div>`))
+  }
   return v
 }
 
@@ -521,6 +559,7 @@ async function route(quiet = false) {
     } else if (page === 'game') {
       let l = state.listings.find((x) => x.id === id)
       if (!l) l = (await api.get(`/api/marketplace/listings/${encodeURIComponent(id)}`).catch(() => ({}))).listing
+      loadListings().then(() => { if (location.hash === `#/game/${encodeURIComponent(id)}` && !document.querySelector('.grid')) route(true) }).catch(() => {})
       shell('market', gameView(l))
     } else if (page === 'signin') {
       if (state.user) return go('#/')
@@ -552,6 +591,7 @@ async function route(quiet = false) {
 
 window.addEventListener('hashchange', () => route())
 ;(async function boot() {
+  try { const v = localStorage.getItem('rex_view'); if (v === 'grid' || v === 'list') state.market.view = v } catch {}
   try { state.user = (await api.get('/api/me')).user } catch { state.user = null }
   route()
 })()
