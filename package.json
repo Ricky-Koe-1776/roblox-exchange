@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Roblox Exchange — safe P2P item trading for gifting-only Roblox games (robloxexchange.com)",
+  "description": "Roblox Exchange: marketplace for buying and selling whole Roblox games (robloxexchange.com)",
   "scripts": {
     "dev": "node server.mjs"
   },

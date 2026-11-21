@@ -1,451 +1,557 @@
-// Roblox Exchange frontend — vanilla JS SPA. No build step.
-// Marketplace for buying/selling whole Roblox games, paid in USDC.
+// Roblox Exchange frontend. Vanilla JS SPA, no build step.
+// Hash routes: #/  #/game/:id  #/sell  #/orders  #/order/:id  #/wallet  #/admin  #/signin
 
 const state = {
   user: null,
-  tab: 'browse', // browse | detail | sell | orders | orderDetail | wallet | admin
-  mktListings: [],
-  mktActiveListing: null,
-  mktOrders: [],
-  mktOrdersBox: 'buying',
-  mktActiveOrder: null,
-  mktWallet: { balance: 0, ledger: [] },
-  mktAdminOrders: [],
+  listings: [],
+  listingsLoaded: false,
+  market: { q: '', price: 'all', sort: 'playing', shown: 40 },
+  ordersBox: 'buying',
+  signin: { username: '', phrase: '', busy: false },
 }
 
 const api = {
-  async get(p) { const r = await fetch(p, { credentials: 'include' }); return r.json() },
+  async get(p) {
+    const r = await fetch(p, { credentials: 'include' })
+    const d = await r.json().catch(() => ({}))
+    if (!r.ok) throw new Error(d.error || 'Something went wrong')
+    return d
+  },
   async post(p, body) {
     const r = await fetch(p, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) })
-    const d = await r.json()
-    if (!r.ok) throw new Error(d.error || 'Error')
+    const d = await r.json().catch(() => ({}))
+    if (!r.ok) throw new Error(d.error || 'Something went wrong')
     return d
   },
 }
 
-function el(html) { const d = document.createElement('div'); d.innerHTML = html.trim(); return d.firstElementChild }
+// ── Helpers ──────────────────────────────────────────────────────────────────
+const el = (html) => { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstElementChild }
+const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+const usd = (n) => {
+  const v = Number(n || 0)
+  return '$' + v.toLocaleString('en-US', { minimumFractionDigits: v % 1 ? 2 : 0, maximumFractionDigits: 2 })
+}
+const usd2 = (n) => '$' + Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+const compact = (n) => {
+  const v = Number(n || 0)
+  if (v >= 1e9) return (v / 1e9).toFixed(1).replace(/\.0$/, '') + 'B'
+  if (v >= 1e6) return (v / 1e6).toFixed(1).replace(/\.0$/, '') + 'M'
+  if (v >= 1e4) return (v / 1e3).toFixed(0) + 'K'
+  if (v >= 1e3) return (v / 1e3).toFixed(1).replace(/\.0$/, '') + 'K'
+  return v.toLocaleString('en-US')
+}
+// Some imported text arrives with escaped newlines/quotes ("\\n"); show them as real characters.
+const cleanText = (s) => String(s || '').replace(/\\r\\n|\\n/g, '\n').replace(/\\t/g, ' ').replace(/\\"/g, '"').trim()
+const go = (hash) => { if (location.hash === hash) route(); else location.hash = hash }
 function toast(msg, kind = 'ok') {
-  const t = document.createElement('div')
-  t.className = `toast ${kind}`
-  t.textContent = msg
+  document.querySelectorAll('.toast').forEach((t) => t.remove())
+  const t = el(`<div class="toast ${kind}" role="status">${esc(msg)}</div>`)
   document.body.appendChild(t)
-  setTimeout(() => t.remove(), 2600)
+  setTimeout(() => t.remove(), 3200)
 }
-function escHtml(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
-}
-function fmtUsd(n) { return `$${Number(n || 0).toFixed(2)}` }
+const thumb = (l, cls = '') => l.thumbnail_url
+  ? `<img class="${cls}" src="${esc(l.thumbnail_url)}" alt="" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'ph'}))">`
+  : '<div class="ph"></div>'
+const statusLabel = { awaiting_payment: 'Awaiting payment', paid: 'Paid, transfer pending', completed: 'Completed', cancelled: 'Cancelled', refunded: 'Refunded' }
+const searchIcon = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>'
 
-// ── Data loaders ──────────────────────────────────────────────────────────────
-async function refresh() {
-  if (state.tab === 'browse') state.mktListings = (await api.get('/api/marketplace/listings')).listings
-  if (state.tab === 'orders') state.mktOrders = state.user ? (await api.get(`/api/marketplace/orders?box=${state.mktOrdersBox}`)).orders : []
-  if (state.tab === 'wallet') state.mktWallet = state.user ? await api.get('/api/marketplace/wallet') : { balance: 0, ledger: [] }
-  if (state.tab === 'admin') state.mktAdminOrders = state.user?.role === 'admin' ? (await api.get('/api/marketplace/admin/orders')).orders : []
-  render()
+async function loadListings(force = false) {
+  if (state.listingsLoaded && !force) return
+  state.listings = (await api.get('/api/marketplace/listings')).listings || []
+  state.listingsLoaded = true
 }
 
-async function openListing(id) {
-  state.tab = 'detail'; state.mktActiveListing = null
-  render()
-  try { state.mktActiveListing = (await api.get(`/api/marketplace/listings/${id}`)).listing }
-  catch (e) { toast(e.message, 'bad') }
-  render()
-}
-
-async function openOrder(id) {
-  state.tab = 'orderDetail'; state.mktActiveOrder = null
-  render()
-  try { state.mktActiveOrder = (await api.get(`/api/marketplace/orders/${id}`)).order }
-  catch (e) { toast(e.message, 'bad') }
-  render()
-}
-
-// ── Shell ─────────────────────────────────────────────────────────────────────
-function render() {
+// ── Shell ────────────────────────────────────────────────────────────────────
+let pollTimer = null
+function shell(active, content) {
   const app = document.getElementById('app')
   app.innerHTML = ''
-  app.appendChild(header())
-  if (!state.user) { app.appendChild(loginView()); return }
-  const wrap = el('<div class="wrap"></div>')
-  wrap.appendChild(tabs())
-  wrap.appendChild(
-    state.tab === 'detail' ? listingDetailView()
-      : state.tab === 'sell' ? sellView()
-      : state.tab === 'orders' ? ordersListView()
-      : state.tab === 'orderDetail' ? orderDetailView()
-      : state.tab === 'wallet' ? walletView()
-      : state.tab === 'admin' ? adminView()
-      : browseView()
-  )
-  app.appendChild(wrap)
-}
-
-function header() {
-  const h = el(`<header><div class="wrap"><div class="nav">
-    <div class="logo">Roblox<span>Exchange</span></div>
-    <div id="userArea"></div>
-  </div></div></header>`)
-  const ua = h.querySelector('#userArea')
+  const links = [['market', '#/', 'Browse'], ['sell', '#/sell', 'Sell a game'], ['orders', '#/orders', 'Orders'], ['wallet', '#/wallet', 'Wallet']]
+  if (state.user?.role === 'admin') links.push(['admin', '#/admin', 'Admin'])
+  const top = el(`<header class="topbar"><div class="wrap">
+    <a class="brand" href="#/"><span class="brand-mark">RE</span>Roblox Exchange</a>
+    <nav class="nav">${links.map(([k, h, t]) => `<a href="${h}" class="${active === k ? 'on' : ''}">${t}</a>`).join('')}</nav>
+    <div class="me"></div>
+  </div></header>`)
+  const me = top.querySelector('.me')
   if (state.user) {
-    ua.innerHTML = `${state.user.avatar ? `<img class="nav-avatar" src="${state.user.avatar}" alt="" onerror="this.style.display='none'">` : ''}<span class="who">Signed in as <b>${escHtml(state.user.username)}</b></span>`
-    const btn = el('<button class="btn ghost" style="margin-left:12px">Logout</button>')
-    btn.onclick = async () => { await api.post('/api/logout'); state.user = null; render() }
-    ua.appendChild(btn)
+    me.innerHTML = `${state.user.avatar ? `<img src="${esc(state.user.avatar)}" alt="">` : ''}<span class="me-name">${esc(state.user.username)}</span>`
+    const out = el('<button class="btn quiet sm">Sign out</button>')
+    out.onclick = async () => { await api.post('/api/logout').catch(() => {}); state.user = null; toast('Signed out'); route() }
+    me.appendChild(out)
   } else {
-    ua.appendChild(el('<a class="btn" href="/api/roblox/oauth/start">Sign in with Roblox</a>'))
+    me.appendChild(el('<a class="btn sm" href="#/signin">Sign in</a>'))
   }
-  return h
+  app.appendChild(top)
+  app.appendChild(content)
+  app.appendChild(el(`<footer><div class="wrap">
+    <span>Roblox Exchange. Not affiliated with Roblox Corporation.</span>
+    <span>Payments in USDC, held until each group transfer is confirmed.</span>
+  </div></footer>`))
 }
 
-function tabs() {
-  const t = el('<div class="tabs"></div>')
-  const defs = [['browse', 'Browse Games'], ['sell', 'Sell Your Game'], ['orders', 'My Orders'], ['wallet', 'Wallet']]
-  if (state.user?.role === 'admin') defs.push(['admin', 'Admin: Finalize'])
-  defs.forEach(([id, label]) => {
-    const active = state.tab === id || (state.tab === 'detail' && id === 'browse') || (state.tab === 'orderDetail' && id === 'orders')
-    const d = el(`<div class="tab ${active ? 'active' : ''}">${label}</div>`)
-    d.onclick = () => { state.tab = id; refresh() }
-    t.appendChild(d)
-  })
-  return t
-}
-
-function loginView() {
-  const err = new URLSearchParams(location.search).get('error') === 'oauth'
-  const v = el('<div class="wrap"></div>')
-
-  v.appendChild(el(`<div class="hero">
-    <h1>The marketplace for Roblox game acquisitions.</h1>
-    <p>Buy and sell whole Roblox games. Every listing is ownership-verified against Roblox's own records, and every payment sits in USDC escrow until the transfer is confirmed — the seller never gets paid upfront.</p>
-    <div class="hero-ctas">
-      <a class="btn" href="/api/roblox/oauth/start">Sign in with Roblox</a>
-      <a class="btn ghost" href="#listings">Browse Listings</a>
-    </div>
-    ${err ? '<p class="fine" style="color:var(--danger);margin-top:14px">Sign-in failed — please try again.</p>' : ''}
-  </div>`))
-
-  v.appendChild(el(`<div class="trust-row">
-    <div class="trust-item">
-      <div class="trust-title">Ownership Verified</div>
-      <div class="trust-sub">Every seller is checked against Roblox's own group-ownership records before a listing goes live.</div>
-    </div>
-    <div class="trust-item">
-      <div class="trust-title">USDC Escrow</div>
-      <div class="trust-sub">Your payment is held the moment you pay — never sent to the seller until the game is actually transferred.</div>
-    </div>
-    <div class="trust-item">
-      <div class="trust-title">Manually Verified Transfers</div>
-      <div class="trust-sub">A real person confirms the Roblox ownership change before any payout is released — not an automated guess.</div>
-    </div>
-  </div>`))
-
-  v.appendChild(el('<h2 class="section-h">How it works</h2>'))
-  const steps = el('<div class="hiw-steps"></div>')
-  ;[
-    ['1', 'Sign in with Roblox', "Connect instantly with Roblox's own login — no password, ever."],
-    ['2', 'Buy with USDC', 'Your payment is held in escrow the moment you pay, not sent to the seller.'],
-    ['3', 'Get the game', 'Once the Roblox ownership transfer is verified, the deal is done and funds release.'],
-  ].forEach(([n, t, s]) => steps.appendChild(el(`<div class="hiw-step"><div class="hiw-num">${n}</div><div><div class="hiw-title">${t}</div><div class="hiw-sub">${s}</div></div></div>`)))
-  v.appendChild(steps)
-
-  v.appendChild(el('<h2 class="section-h" id="listings">Recently listed</h2>'))
-  if (!state.mktListings.length) {
-    v.appendChild(el('<div class="empty">No games listed yet — sign in to be the first to sell one.</div>'))
-  } else {
-    const grid = el('<div class="listing-grid"></div>')
-    state.mktListings.slice(0, 6).forEach((l) => {
-      const card = el(`<div class="listing-card">
-        ${l.thumbnail_url ? `<img class="listing-thumb" src="${l.thumbnail_url}" onerror="this.style.display='none'">` : '<div class="listing-thumb-ph"></div>'}
-        <div class="listing-body">
-          <div class="listing-title">${escHtml(l.title)}</div>
-          <div class="listing-price">${fmtUsd(l.price_usdc)}</div>
-          <div class="listing-stats"><span>${l.ccu} CCU</span><span>${Number(l.visits).toLocaleString()} visits</span><span>${l.favorites} favs</span></div>
-        </div>
-      </div>`)
-      card.onclick = () => { location.href = '/api/roblox/oauth/start' }
-      grid.appendChild(card)
-    })
-    v.appendChild(grid)
-    v.appendChild(el('<p class="fine" style="text-align:center;margin-top:14px">Sign in to view full details or buy.</p>'))
-  }
-
-  v.appendChild(el(`<div class="card login" style="margin:40px auto 60px">
-    <a class="btn" href="/api/roblox/oauth/start">Sign in with Roblox</a>
-    <p class="fine">We use Roblox's own sign-in — no password, ever.</p>
-  </div>`))
+function gate(title, text) {
+  const v = el(`<main class="page"><div class="wrap"><div class="panel gate narrow" style="margin:0 auto">
+    <h2>${title}</h2><p>${text}</p><a class="btn go lg" href="#/signin">Sign in with your Roblox username</a>
+  </div></div></main>`)
+  state.returnTo = location.hash
   return v
 }
 
-// ── Browse ────────────────────────────────────────────────────────────────────
-function browseView() {
-  const c = el('<div></div>')
-  if (!state.mktListings.length) { c.appendChild(el('<div class="empty">No games listed yet. Be the first to sell one.</div>')); return c }
-  const grid = el('<div class="listing-grid"></div>')
-  state.mktListings.forEach((l) => {
-    const card = el(`<div class="listing-card">
-      ${l.thumbnail_url ? `<img class="listing-thumb" src="${l.thumbnail_url}" onerror="this.style.display='none'">` : '<div class="listing-thumb-ph"></div>'}
-      <div class="listing-body">
-        <div class="listing-title">${escHtml(l.title)}</div>
-        <div class="listing-price">${fmtUsd(l.price_usdc)}</div>
-        <div class="listing-stats"><span>${l.ccu} CCU</span><span>${Number(l.visits).toLocaleString()} visits</span><span>${l.favorites} favs</span></div>
-      </div>
-    </div>`)
-    card.onclick = () => openListing(l.id)
-    grid.appendChild(card)
-  })
-  c.appendChild(grid)
-  return c
+// ── Market (home) ────────────────────────────────────────────────────────────
+const PRICE_BANDS = [
+  ['all', 'Any price', () => true],
+  ['u100', 'Under $100', (p) => p < 100],
+  ['100-1k', '$100 to $1K', (p) => p >= 100 && p < 1000],
+  ['1k-10k', '$1K to $10K', (p) => p >= 1000 && p < 10000],
+  ['10k', '$10K+', (p) => p >= 10000],
+]
+const SORTS = {
+  playing: ['Most players now', (a, b) => b.ccu - a.ccu],
+  visits: ['Most visits', (a, b) => b.visits - a.visits],
+  favs: ['Most favorites', (a, b) => b.favorites - a.favorites],
+  price_asc: ['Price, low to high', (a, b) => a.price_usdc - b.price_usdc],
+  price_desc: ['Price, high to low', (a, b) => b.price_usdc - a.price_usdc],
+  newest: ['Newest', (a, b) => new Date(b.created_at) - new Date(a.created_at)],
+}
+function filtered() {
+  const { q, price, sort } = state.market
+  const band = PRICE_BANDS.find((b) => b[0] === price)[2]
+  const needle = q.trim().toLowerCase()
+  return state.listings
+    .map((l) => ({ ...l, price_usdc: Number(l.price_usdc), ccu: Number(l.ccu || 0), visits: Number(l.visits || 0), favorites: Number(l.favorites || 0) }))
+    .filter((l) => band(l.price_usdc) && (!needle || l.title.toLowerCase().includes(needle)))
+    .sort(SORTS[sort][1])
 }
 
-// ── Listing detail / buy ─────────────────────────────────────────────────────
-function listingDetailView() {
-  const c = el('<div></div>')
-  const back = el('<button class="btn ghost" style="margin-bottom:16px">← Back to Browse</button>')
-  back.onclick = () => { state.tab = 'browse'; refresh() }
-  c.appendChild(back)
-  const l = state.mktActiveListing
-  if (!l) { c.appendChild(el('<div class="empty">Loading…</div>')); return c }
+function marketView() {
+  const L = state.listings
+  const players = L.reduce((s, l) => s + Number(l.ccu || 0), 0)
+  const prices = L.map((l) => Number(l.price_usdc)).sort((a, b) => a - b)
+  const median = prices.length ? prices[Math.floor(prices.length / 2)] : 0
 
-  const grid = el('<div class="listing-detail"></div>')
-  const left = el('<div></div>')
-  left.appendChild(el(l.thumbnail_url ? `<img class="listing-detail-thumb" src="${l.thumbnail_url}" onerror="this.style.display='none'">` : '<div class="listing-detail-thumb-ph"></div>'))
-  left.appendChild(el(`<h2 style="margin-top:16px">${escHtml(l.title)}</h2>`))
-  left.appendChild(el(`<div class="listing-stats" style="margin-top:8px;font-size:13px">
-    <span>${l.ccu} playing now</span><span>${Number(l.visits).toLocaleString()} visits</span><span>${l.favorites} favorites</span>
-  </div>`))
-  left.appendChild(el(`<div class="listing-desc">${escHtml(l.description || 'No description provided.')}</div>`))
-  left.appendChild(el(`<div class="muted" style="font-size:13px">Listed by <b>${escHtml(l.seller_username)}</b> · Roblox group ${escHtml(l.group_id)}</div>`))
+  const v = el('<main></main>')
+  v.appendChild(el(`<div class="wrap"><section class="hero">
+    <div>
+      <div class="eyebrow"><span class="live-dot"></span>Live marketplace</div>
+      <h1>Buy a Roblox game that <mark>already has players.</mark></h1>
+      <p>Every game here is listed with its live player count, lifetime visits and asking price. Pay in USDC, and the money is held until the Roblox group is transferred to you.</p>
+      <div class="hero-ctas">
+        <a class="btn go lg" href="#market">Browse ${L.length ? L.length.toLocaleString() + ' ' : ''}games</a>
+        <a class="btn quiet lg" href="#/sell">Sell your game</a>
+      </div>
+    </div>
+    <aside class="snapshot" aria-label="Market snapshot">
+      <div class="snapshot-head"><span>Market right now</span><span class="muted num">${new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span></div>
+      <div class="snapshot-row"><span class="k">Games for sale</span><span class="v">${L.length.toLocaleString()}</span></div>
+      <div class="snapshot-row"><span class="k">Playing across all listings</span><span class="v">${players.toLocaleString()}</span></div>
+      <div class="snapshot-row"><span class="k">Median asking price</span><span class="v">${usd(median)}</span></div>
+    </aside>
+  </section>
+  <section class="process" aria-label="How buying works">
+    <div><span class="n">01</span><b>Pick a game</b><p>Compare players, visits and favorites pulled from Roblox, then open the listing.</p></div>
+    <div><span class="n">02</span><b>Pay in USDC</b><p>You get a payment address for the exact amount. Funds are held, not sent to the seller.</p></div>
+    <div><span class="n">03</span><b>Receive the group</b><p>The group that owns the game is transferred to your account, then a person confirms it and the sale closes.</p></div>
+  </section></div>`))
+
+  const sec = el(`<section class="wrap" id="market" style="padding-bottom:72px"></section>`)
+  sec.appendChild(el(`<div class="market-head"><h2 class="section-title">Games for sale</h2><span class="count" id="count"></span></div>`))
+  const controls = el(`<div class="controls">
+    <label class="search"><span class="sr">Search games</span>${searchIcon}<input class="input" id="q" type="search" placeholder="Search by game title" value="${esc(state.market.q)}"></label>
+    <select class="input" id="sort" aria-label="Sort">${Object.entries(SORTS).map(([k, [t]]) => `<option value="${k}" ${state.market.sort === k ? 'selected' : ''}>${t}</option>`).join('')}</select>
+  </div>`)
+  const chips = el(`<div class="chips" style="margin-bottom:16px">${PRICE_BANDS.map(([k, t]) => `<button class="chip ${state.market.price === k ? 'on' : ''}" data-k="${k}">${t}</button>`).join('')}</div>`)
+  sec.appendChild(controls)
+  sec.appendChild(chips)
+  const tableWrap = el('<div></div>')
+  sec.appendChild(tableWrap)
+  v.appendChild(sec)
+
+  const head = (key, label, cls = '') => `<div class="${cls}"><button data-sort="${key}" class="${state.market.sort === key || (key === 'price' && state.market.sort.startsWith('price')) ? 'on' : ''}">${label}</button></div>`
+  function drawTable() {
+    const rows = filtered()
+    sec.querySelector('#count').textContent = `${rows.length.toLocaleString()} ${rows.length === 1 ? 'game' : 'games'}`
+    tableWrap.innerHTML = ''
+    if (!state.listingsLoaded) { tableWrap.appendChild(el('<div class="table"><div class="empty">Loading games…</div></div>')); return }
+    if (!rows.length) {
+      tableWrap.appendChild(el(`<div class="table"><div class="empty"><b>No games match.</b>${state.listings.length ? 'Try a different search or price range.' : 'Nothing is listed yet.'}</div></div>`))
+      return
+    }
+    const t = el(`<div class="table" role="table">
+      <div class="trow th" role="row">
+        <div>Game</div>${head('playing', 'Playing', 'r c-play')}${head('visits', 'Visits', 'r c-visits')}${head('favs', 'Favorites', 'r c-favs')}${head('price', 'Price', 'r')}
+      </div></div>`)
+    rows.slice(0, state.market.shown).forEach((l) => {
+      t.appendChild(el(`<a class="trow" role="row" href="#/game/${encodeURIComponent(l.id)}">
+        <div class="game">${thumb(l)}<div style="min-width:0"><div class="game-title">${esc(l.title)}</div>
+          <div class="game-sub num">${compact(l.ccu)} playing · ${compact(l.visits)} visits</div></div></div>
+        <div class="cell r c-play"><span class="playing ${l.ccu ? '' : 'zero'}"><i></i>${l.ccu.toLocaleString()}</span></div>
+        <div class="cell r c-visits">${compact(l.visits)}</div>
+        <div class="cell r c-favs">${compact(l.favorites)}</div>
+        <div class="cell r price">${usd(l.price_usdc)}</div>
+      </a>`))
+    })
+    t.querySelectorAll('[data-sort]').forEach((b) => {
+      b.onclick = () => {
+        const k = b.dataset.sort
+        state.market.sort = k === 'price' ? (state.market.sort === 'price_asc' ? 'price_desc' : 'price_asc') : k
+        controls.querySelector('#sort').value = state.market.sort
+        drawTable()
+      }
+    })
+    tableWrap.appendChild(t)
+    if (rows.length > state.market.shown) {
+      const more = el(`<div class="more"><button class="btn quiet">Show more (${(rows.length - state.market.shown).toLocaleString()} left)</button></div>`)
+      more.querySelector('button').onclick = () => { state.market.shown += 40; drawTable() }
+      tableWrap.appendChild(more)
+    }
+  }
+  controls.querySelector('#q').oninput = (e) => { state.market.q = e.target.value; state.market.shown = 40; drawTable() }
+  controls.querySelector('#sort').onchange = (e) => { state.market.sort = e.target.value; drawTable() }
+  chips.querySelectorAll('.chip').forEach((c) => {
+    c.onclick = () => {
+      state.market.price = c.dataset.k; state.market.shown = 40
+      chips.querySelectorAll('.chip').forEach((x) => x.classList.toggle('on', x === c))
+      drawTable()
+    }
+  })
+  v.querySelector('a[href="#market"]').onclick = (e) => { e.preventDefault(); sec.scrollIntoView({ behavior: 'smooth' }) }
+  drawTable()
+  return v
+}
+
+// ── Game detail ──────────────────────────────────────────────────────────────
+function gameView(l) {
+  const v = el('<main class="page"><div class="wrap"></div></main>')
+  const w = v.firstElementChild
+  w.appendChild(el('<a class="back" href="#/">← All games</a>'))
+  if (!l) { w.appendChild(el('<div class="panel empty"><b>Listing not found.</b>It may have sold or been removed.</div>')); return v }
+
+  const grid = el('<div class="detail"></div>')
+  const left = el(`<div>
+    <div class="detail-top">${thumb(l)}
+      <div style="min-width:0"><h1>${esc(l.title)}</h1>
+        <div class="detail-links">
+          <a href="https://www.roblox.com/games/${encodeURIComponent(l.place_id)}" target="_blank" rel="noopener">Open on Roblox ↗</a>
+          <a href="https://www.roblox.com/communities/${encodeURIComponent(l.group_id)}" target="_blank" rel="noopener">Owning group ↗</a>
+        </div>
+      </div>
+    </div>
+    <div class="stats">
+      <div><div class="k">Playing now</div><div class="v">${Number(l.ccu || 0).toLocaleString()}</div></div>
+      <div><div class="k">Visits</div><div class="v">${compact(l.visits)}</div></div>
+      <div><div class="k">Favorites</div><div class="v">${compact(l.favorites)}</div></div>
+    </div>
+    <div class="prose-h">About this listing</div>
+    <div class="prose">${esc(cleanText(l.description) || 'The seller has not added a description.')}</div>
+  </div>`)
   grid.appendChild(left)
 
-  const right = el('<div class="buy-box"></div>')
-  right.appendChild(el(`<div class="buy-price">${fmtUsd(l.price_usdc)}</div>`))
-  right.appendChild(el('<div class="buy-sub">Paid in USDC. Funds are held until an admin confirms the Roblox group ownership transfer.</div>'))
+  const buy = el(`<aside class="panel buy">
+    <div class="buy-price">${usd(l.price_usdc)}</div>
+    <div class="buy-cur">Paid in USDC · listed by ${esc(l.seller_username)}</div>
+    <div class="buy-action"></div>
+    <ol class="steps">
+      <li><div><b>Pay the exact amount</b>You get a USDC address for this order.</div></li>
+      <li><div><b>Funds are held</b>The seller is not paid yet.</div></li>
+      <li><div><b>Group is transferred to you</b>A person confirms the change on Roblox, then the sale closes.</div></li>
+    </ol>
+  </aside>`)
+  const act = buy.querySelector('.buy-action')
   if (l.status !== 'active') {
-    right.appendChild(el(`<div class="empty" style="padding:10px 0">This listing is ${escHtml(l.status)}.</div>`))
+    act.appendChild(el(`<div class="callout">This listing is ${esc(statusLabel[l.status] || l.status).toLowerCase()}.</div>`))
+  } else if (!state.user) {
+    const b = el('<a class="btn go lg block" href="#/signin">Sign in to buy</a>')
+    b.onclick = () => { state.returnTo = location.hash }
+    act.appendChild(b)
+    act.appendChild(el('<div class="note">Sign in with your Roblox username. No password needed.</div>'))
   } else if (l.seller_id === state.user.id) {
-    right.appendChild(el('<div class="empty" style="padding:10px 0">This is your listing.</div>'))
-    const cancel = el('<button class="btn danger" style="width:100%">Remove Listing</button>')
-    cancel.onclick = async () => {
-      try { await api.post(`/api/marketplace/listings/${l.id}/cancel`); toast('Listing removed'); state.tab = 'browse'; await refresh() }
+    act.appendChild(el('<div class="callout" style="margin:0 0 12px">This is your listing.</div>'))
+    const rm = el('<button class="btn danger block">Remove listing</button>')
+    rm.onclick = async () => {
+      if (!confirm('Remove this listing?')) return
+      try { await api.post(`/api/marketplace/listings/${l.id}/cancel`); toast('Listing removed'); await loadListings(true); go('#/') }
       catch (e) { toast(e.message, 'bad') }
     }
-    right.appendChild(cancel)
+    act.appendChild(rm)
   } else {
-    const buy = el('<button class="btn" style="width:100%">Buy Now</button>')
-    buy.onclick = async () => {
-      try {
-        const d = await api.post(`/api/marketplace/listings/${l.id}/buy`)
-        toast('Order created — send payment to continue')
-        await openOrder(d.id)
-      } catch (e) { toast(e.message, 'bad') }
+    const b = el('<button class="btn go lg block">Buy now</button>')
+    b.onclick = async () => {
+      b.disabled = true
+      try { const d = await api.post(`/api/marketplace/listings/${l.id}/buy`); toast('Order created. Send payment to continue.'); go(`#/order/${d.id}`) }
+      catch (e) { toast(e.message, 'bad'); b.disabled = false }
     }
-    right.appendChild(buy)
+    act.appendChild(b)
   }
-  grid.appendChild(right)
-  c.appendChild(grid)
-  return c
+  grid.appendChild(buy)
+  w.appendChild(grid)
+  return v
 }
 
-// ── Sell ──────────────────────────────────────────────────────────────────────
-function sellView() {
-  const c = el('<div></div>')
-  const form = el(`<div class="card sell-form" style="max-width:560px">
-    <h2 style="margin-bottom:4px">Sell Your Game</h2>
-    <p class="muted" style="font-size:13px">Games are sold via Roblox group-ownership transfer — the game must be owned by a group you're the OWNER of (not just admin).</p>
-    <label>Roblox Group ID</label>
-    <input id="sGroup" placeholder="e.g. 1234567" />
-    <div class="sell-hint">The numeric ID from the group's Roblox page URL. You must be the group's owner.</div>
-    <label>Roblox Place ID</label>
-    <input id="sPlace" placeholder="e.g. 9876543" />
-    <div class="sell-hint">The numeric ID from the game's Roblox page URL. Used to pull live CCU/visits/favorites.</div>
-    <label>Title</label>
-    <input id="sTitle" maxlength="80" placeholder="Game title" />
-    <label>Description</label>
-    <textarea id="sDesc" maxlength="2000" placeholder="What's included, why it's worth it..."></textarea>
-    <label>Price (USDC)</label>
-    <input id="sPrice" type="number" min="1" step="0.01" placeholder="500" />
-    <button class="btn" id="sSubmit" style="width:100%;margin-top:18px">List Game</button>
-  </div>`)
-  form.querySelector('#sSubmit').onclick = async () => {
-    const groupId = form.querySelector('#sGroup').value.trim()
-    const placeId = form.querySelector('#sPlace').value.trim()
-    const title = form.querySelector('#sTitle').value.trim()
-    const description = form.querySelector('#sDesc').value.trim()
-    const priceUsdc = form.querySelector('#sPrice').value.trim()
-    try {
-      await api.post('/api/marketplace/listings', { groupId, placeId, title, description, priceUsdc })
-      toast('Game listed!')
-      state.tab = 'browse'; await refresh()
-    } catch (e) { toast(e.message, 'bad') }
-  }
-  c.appendChild(form)
-  return c
-}
+// ── Sign in (Roblox bio code) ────────────────────────────────────────────────
+function signinView() {
+  const s = state.signin
+  const v = el('<main class="page"><div class="wrap"><div class="narrow" style="margin:0 auto"></div></div></main>')
+  const w = v.querySelector('.narrow')
+  w.appendChild(el(`<div class="page-head"><h1>Sign in</h1><p>We confirm you own your Roblox account by having you put a short code in your profile's About section. No password, and you can delete the code afterwards.</p></div>`))
+  const panel = el('<div class="panel"></div>')
+  w.appendChild(panel)
 
-// ── Orders ────────────────────────────────────────────────────────────────────
-function ordersListView() {
-  const c = el('<div></div>')
-  const toggle = el(`<div class="mkt-subtabs" style="max-width:380px;margin-bottom:14px">
-    <div class="mkt-subtab ${state.mktOrdersBox === 'buying' ? 'active' : ''}" data-b="buying">Buying</div>
-    <div class="mkt-subtab ${state.mktOrdersBox === 'selling' ? 'active' : ''}" data-b="selling">Selling</div></div>`)
-  toggle.querySelectorAll('.mkt-subtab').forEach((x) => { x.onclick = () => { state.mktOrdersBox = x.dataset.b; refresh() } })
-  c.appendChild(toggle)
-  if (!state.mktOrders.length) { c.appendChild(el('<div class="empty">No orders yet.</div>')); return c }
-  state.mktOrders.forEach((o) => {
-    const card = el(`<div class="order-card">
-      <div class="order-card-top"><b>${fmtUsd(o.price_usdc)}</b><span class="status-chip status-${o.status}">${o.status.replace('_', ' ')}</span></div>
-      <div class="muted" style="font-size:13px">${state.mktOrdersBox === 'buying' ? 'Seller: ' + escHtml(o.seller_username) : 'Buyer: ' + escHtml(o.buyer_username)}</div>
-    </div>`)
-    card.onclick = () => openOrder(o.id)
-    c.appendChild(card)
-  })
-  return c
-}
-
-let _orderPollTimer = null
-function orderDetailView() {
-  clearTimeout(_orderPollTimer)
-  const c = el('<div></div>')
-  const back = el('<button class="btn ghost" style="margin-bottom:16px">← Back to Orders</button>')
-  back.onclick = () => { clearTimeout(_orderPollTimer); state.tab = 'orders'; refresh() }
-  c.appendChild(back)
-
-  const o = state.mktActiveOrder
-  if (!o) { c.appendChild(el('<div class="empty">Loading…</div>')); return c }
-
-  const card = el(`<div class="card" style="max-width:560px">
-    <div class="order-card-top"><h2 style="margin:0">${fmtUsd(o.price_usdc)}</h2><span class="status-chip status-${o.status}">${o.status.replace('_', ' ')}</span></div>
-  </div>`)
-
-  const steps = [
-    { title: 'Payment', sub: 'Buyer sends USDC to the order address.' },
-    { title: 'Ownership transfer', sub: 'Seller transfers the Roblox group to the buyer. An admin confirms and releases payout.' },
-    { title: 'Done', sub: "Payout released to the seller's wallet." },
-  ]
-  const orderKeys = ['awaiting_payment', 'paid', 'completed']
-  const curIdx = orderKeys.indexOf(o.status)
-  if (curIdx >= 0) {
-    const track = el('<div class="order-track"></div>')
-    steps.forEach((s, i) => {
-      const cls = i < curIdx ? 'done' : i === curIdx ? 'active' : ''
-      track.appendChild(el(`<div class="order-step ${cls}">
-        <div class="order-dot">${i < curIdx ? '✓' : i + 1}</div>
-        <div><div class="order-step-title">${s.title}</div><div class="order-step-sub">${s.sub}</div></div>
-      </div>`))
-    })
-    card.appendChild(track)
-  }
-
-  if (o.status === 'awaiting_payment' && state.user?.id === o.buyer_id) {
-    card.appendChild(el('<div class="sell-hint">Send exactly this amount in USDC to:</div>'))
-    card.appendChild(el(`<div class="pay-address">${escHtml(o.pay_address || 'generating…')}</div>`))
-    const row = el('<div class="row" style="margin-top:12px;gap:10px"></div>')
-    const check = el('<button class="btn">I&rsquo;ve Paid — Check Status</button>')
+  if (!s.phrase) {
+    panel.appendChild(el(`<label class="field"><span>Roblox username</span><input class="input" id="u" autocomplete="username" placeholder="e.g. Builderman" value="${esc(s.username)}"><small>Your username, not your display name.</small></label>`))
+    const b = el('<button class="btn go lg block">Get my code</button>')
+    const input = panel.querySelector('#u')
+    const submit = async () => {
+      s.username = input.value.trim()
+      if (!s.username) return toast('Enter your Roblox username', 'bad')
+      b.disabled = true
+      try { s.phrase = (await api.post('/api/roblox/challenge', { username: s.username })).phrase; route() }
+      catch (e) { toast(e.message, 'bad'); b.disabled = false }
+    }
+    b.onclick = submit
+    input.onkeydown = (e) => { if (e.key === 'Enter') submit() }
+    panel.appendChild(b)
+    setTimeout(() => input.focus(), 0)
+  } else {
+    panel.appendChild(el(`<ol class="track" style="margin-top:0">
+      <li class="now"><div class="dot">1</div><div><b>Copy this code</b><div class="addr" style="margin-bottom:8px" id="code">${esc(s.phrase)}</div></div></li>
+      <li class="now"><div class="dot">2</div><div><b>Paste it into your Roblox About section</b><span>On Roblox, open your profile, edit the About text, paste the code anywhere and save.</span></div></li>
+      <li class="now"><div class="dot">3</div><div><b>Come back and check</b><span>We'll look for it on <b style="display:inline">${esc(s.username)}</b>'s profile. The code works for 10 minutes.</span></div></li>
+    </ol>`))
+    const row = el('<div style="display:flex;gap:10px;flex-wrap:wrap"></div>')
+    const copy = el('<button class="btn quiet">Copy code</button>')
+    copy.onclick = async () => { try { await navigator.clipboard.writeText(s.phrase); toast('Code copied') } catch { toast('Select the code and copy it', 'bad') } }
+    const open = el('<a class="btn quiet" href="https://www.roblox.com/users/profile" target="_blank" rel="noopener">Open my Roblox profile ↗</a>')
+    row.appendChild(copy); row.appendChild(open)
+    panel.appendChild(row)
+    const check = el('<button class="btn go lg block" style="margin-top:16px">I added it, check my profile</button>')
     check.onclick = async () => {
+      check.disabled = true; check.textContent = 'Checking your profile…'
       try {
-        const d = await api.post(`/api/marketplace/orders/${o.id}/check-payment`)
-        state.mktActiveOrder = d.order
-        toast(d.order.status === 'paid' ? 'Payment received!' : 'Not received yet — try again shortly')
-        render()
-      } catch (e) { toast(e.message, 'bad') }
+        await api.post('/api/roblox/verify', { username: s.username })
+        state.user = (await api.get('/api/me')).user
+        state.signin = { username: '', phrase: '', busy: false }
+        toast(`Signed in as ${state.user?.username || 'you'}`)
+        const back = state.returnTo && state.returnTo !== '#/signin' ? state.returnTo : '#/'
+        state.returnTo = null
+        go(back)
+      } catch (e) { toast(e.message, 'bad'); check.disabled = false; check.textContent = 'I added it, check my profile' }
     }
-    const cancelBtn = el('<button class="btn danger">Cancel Order</button>')
-    cancelBtn.onclick = async () => {
-      try { await api.post(`/api/marketplace/orders/${o.id}/cancel`); toast('Order cancelled'); state.tab = 'orders'; await refresh() }
-      catch (e) { toast(e.message, 'bad') }
-    }
-    row.appendChild(check); row.appendChild(cancelBtn)
-    card.appendChild(row)
-  } else if (o.status === 'awaiting_payment') {
-    card.appendChild(el('<div class="sell-hint">Waiting for the buyer to pay.</div>'))
+    panel.appendChild(check)
+    const reset = el('<button class="btn quiet sm" style="margin-top:12px">Use a different username</button>')
+    reset.onclick = () => { s.phrase = ''; route() }
+    panel.appendChild(reset)
   }
-
-  if (o.status === 'paid') {
-    const who = state.user?.id === o.seller_id ? 'You' : 'The seller'
-    card.appendChild(el(`<div class="sell-hint">${who} should transfer the Roblox group to the buyer's connected account now.${o.transfer_deadline ? ` Window ends ${new Date(o.transfer_deadline).toLocaleString()}.` : ''} An admin will verify the transfer and release the payout — this page updates automatically once that happens.</div>`))
-  }
-  if (o.status === 'completed') card.appendChild(el('<div class="sell-hint">Completed. Payout was released to the seller&rsquo;s wallet.</div>'))
-  if (o.status === 'cancelled') card.appendChild(el('<div class="sell-hint">This order was cancelled.</div>'))
-
-  c.appendChild(card)
-
-  // Lightweight read-only poll so buyer/seller see the admin's finalize in near real time.
-  if (['awaiting_payment', 'paid'].includes(o.status)) {
-    _orderPollTimer = setTimeout(async () => {
-      try {
-        const d = await api.get(`/api/marketplace/orders/${o.id}`)
-        state.mktActiveOrder = d.order
-        if (state.tab === 'orderDetail') render()
-      } catch {}
-    }, 5000)
-  }
-  return c
+  return v
 }
 
-// ── Wallet ────────────────────────────────────────────────────────────────────
-function walletView() {
-  const c = el('<div></div>')
-  const w = state.mktWallet
-  const card = el(`<div class="card" style="max-width:560px">
-    <div class="muted" style="font-size:13px">Available balance</div>
-    <div class="wallet-balance">${fmtUsd(w.balance)}</div>
-    <label style="display:block;font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin-bottom:6px;font-weight:700">Withdraw to address</label>
-    <input id="wAddr" placeholder="Your USDC wallet address" style="width:100%;background:var(--panel-2);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:10px 12px;margin-bottom:10px" />
-    <input id="wAmt" type="number" min="1" step="0.01" placeholder="Amount" style="width:100%;background:var(--panel-2);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:10px 12px;margin-bottom:10px" />
-    <button class="btn" id="wSubmit" style="width:100%">Request Withdrawal</button>
-  </div>`)
-  card.querySelector('#wSubmit').onclick = async () => {
-    const toAddress = card.querySelector('#wAddr').value.trim()
-    const amount = card.querySelector('#wAmt').value.trim()
+// ── Sell ─────────────────────────────────────────────────────────────────────
+function sellView() {
+  if (!state.user) return gate('Sign in to list a game', 'Listings are tied to your verified Roblox account so buyers know who owns the group.')
+  const v = el(`<main class="page"><div class="wrap"><div class="narrow">
+    <div class="page-head"><h1>Sell a game</h1><p>Games sell by transferring the Roblox group that owns them. You need to be the group's owner, not just an admin. We check ownership with Roblox before the listing goes live.</p></div>
+    <div class="panel">
+      <label class="field"><span>Roblox group ID</span><input class="input" id="g" inputmode="numeric" placeholder="1234567"><small>The number in the group's page URL.</small></label>
+      <label class="field"><span>Place ID</span><input class="input" id="p" inputmode="numeric" placeholder="9876543210"><small>The number in the game's page URL. We use it to pull live players, visits and favorites.</small></label>
+      <label class="field"><span>Listing title</span><input class="input" id="t" maxlength="80" placeholder="Your game's name"></label>
+      <label class="field"><span>Description</span><textarea class="input" id="d" maxlength="2000" placeholder="Revenue, update history, what's included, why you're selling"></textarea></label>
+      <label class="field"><span>Asking price (USDC)</span><input class="input" id="pr" type="number" min="1" step="0.01" placeholder="500"></label>
+      <button class="btn go lg block" id="sub">Publish listing</button>
+    </div>
+  </div></div></main>`)
+  const $ = (id) => v.querySelector('#' + id).value.trim()
+  v.querySelector('#sub').onclick = async (e) => {
+    e.target.disabled = true
     try {
-      await api.post('/api/marketplace/wallet/withdraw', { amount, toAddress })
-      toast('Withdrawal requested')
-      await refresh()
-    } catch (e) { toast(e.message, 'bad') }
+      const d = await api.post('/api/marketplace/listings', { groupId: $('g'), placeId: $('p'), title: $('t'), description: $('d'), priceUsdc: $('pr') })
+      toast('Your game is listed'); await loadListings(true); go(`#/game/${d.id}`)
+    } catch (err) { toast(err.message, 'bad'); e.target.disabled = false }
   }
-  c.appendChild(card)
-  c.appendChild(el('<h3 style="margin:22px 0 12px">History</h3>'))
-  if (!w.ledger?.length) { c.appendChild(el('<div class="empty">No wallet activity yet.</div>')); return c }
-  w.ledger.forEach((l) => {
-    const pos = l.kind === 'sale'
-    c.appendChild(el(`<div class="ledger-row">
-      <span>${pos ? 'Sale payout' : 'Withdrawal'}${l.status !== 'completed' ? ` (${l.status})` : ''}</span>
-      <span class="ledger-amt ${pos ? 'pos' : 'neg'}">${pos ? '+' : '-'}${fmtUsd(l.amount_usdc)}</span>
-    </div>`))
-  })
-  return c
+  return v
 }
 
-// ── Admin ─────────────────────────────────────────────────────────────────────
-function adminView() {
-  const c = el('<div></div>')
-  if (state.user?.role !== 'admin') { c.appendChild(el('<div class="empty">Admin only.</div>')); return c }
-  c.appendChild(el("<p class=\"muted\" style=\"margin-bottom:16px\">Orders here are paid and waiting for you to confirm the Roblox group ownership actually transferred to the buyer before releasing the seller's payout.</p>"))
-  if (!state.mktAdminOrders.length) { c.appendChild(el('<div class="empty">Nothing waiting on finalization.</div>')); return c }
-  state.mktAdminOrders.forEach((o) => {
-    const card = el(`<div class="order-card" style="cursor:default">
-      <div class="order-card-top"><b>${fmtUsd(o.price_usdc)}</b><span class="status-chip status-${o.status}">${o.status}</span></div>
-      <div class="muted" style="font-size:13px">Buyer: ${escHtml(o.buyer_username)} → Seller: ${escHtml(o.seller_username)}</div>
-      <div class="muted" style="font-size:12px;margin-top:4px">Paid ${o.paid_at ? new Date(o.paid_at).toLocaleString() : ''}</div>
-      ${o.source_url ? `<div style="font-size:12px;margin-top:6px">Source: <a href="${escHtml(o.source_url)}" target="_blank" rel="noopener">${escHtml(o.source || 'link')}</a>${o.source_price_usdc ? ` · cost ${fmtUsd(o.source_price_usdc)}` : ''}</div>` : ''}
-    </div>`)
-    const btn = el('<button class="btn" style="margin-top:8px">Verify Transfer &amp; Finalize</button>')
-    btn.onclick = async () => {
-      try { await api.post(`/api/marketplace/orders/${o.id}/finalize`); toast('Order finalized — seller paid out'); await refresh() }
+// ── Orders ───────────────────────────────────────────────────────────────────
+function ordersView(orders) {
+  if (!state.user) return gate('Sign in to see your orders', 'Purchases and sales show up here once you are signed in.')
+  const v = el(`<main class="page"><div class="wrap">
+    <div class="page-head"><h1>Orders</h1></div>
+    <div class="seg"><button data-b="buying" class="${state.ordersBox === 'buying' ? 'on' : ''}">Buying</button><button data-b="selling" class="${state.ordersBox === 'selling' ? 'on' : ''}">Selling</button></div>
+    <div class="list"></div>
+  </div></main>`)
+  v.querySelectorAll('.seg button').forEach((b) => { b.onclick = () => { state.ordersBox = b.dataset.b; route() } })
+  const list = v.querySelector('.list')
+  if (!orders.length) list.appendChild(el(`<div class="empty"><b>No orders yet.</b>${state.ordersBox === 'buying' ? 'Games you buy will appear here.' : 'Sales of your games will appear here.'}</div>`))
+  const byId = Object.fromEntries(state.listings.map((l) => [l.id, l]))
+  orders.forEach((o) => {
+    const l = byId[o.listing_id]
+    list.appendChild(el(`<a class="list-row" href="#/order/${encodeURIComponent(o.id)}">
+      <div style="min-width:0"><div class="t">${esc(l?.title || 'Game order')}</div>
+      <div class="s">${state.ordersBox === 'buying' ? 'From ' + esc(o.seller_username) : 'To ' + esc(o.buyer_username)} · ${new Date(o.created_at).toLocaleDateString()}</div></div>
+      <div style="display:flex;align-items:center;gap:14px"><span class="pill ${o.status}">${statusLabel[o.status] || o.status}</span><span class="num" style="font-weight:700">${usd(o.price_usdc)}</span></div>
+    </a>`))
+  })
+  return v
+}
+
+function orderView(o) {
+  if (!state.user) return gate('Sign in to view this order', 'Orders are only visible to the buyer and the seller.')
+  const v = el('<main class="page"><div class="wrap"><div class="narrow"></div></div></main>')
+  const w = v.querySelector('.narrow')
+  w.appendChild(el('<a class="back" href="#/orders">← All orders</a>'))
+  if (!o) { w.appendChild(el('<div class="panel empty"><b>Order not found.</b></div>')); return v }
+  const l = state.listings.find((x) => x.id === o.listing_id)
+  const isBuyer = state.user.id === o.buyer_id
+  const p = el(`<div class="panel">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">
+      <div><div class="muted" style="font-size:13px;font-weight:600">${esc(l?.title || 'Game order')}</div><div class="buy-price" style="margin-top:6px">${usd2(o.price_usdc)}</div></div>
+      <span class="pill ${o.status}">${statusLabel[o.status] || o.status}</span>
+    </div>
+  </div>`)
+  const keys = ['awaiting_payment', 'paid', 'completed']
+  const cur = keys.indexOf(o.status)
+  if (cur >= 0) {
+    const steps = [
+      ['Payment', 'The buyer sends USDC to the order address.'],
+      ['Group transfer', 'The seller transfers the group to the buyer. A person confirms it on Roblox.'],
+      ['Done', "The seller's payout is released."],
+    ]
+    p.appendChild(el(`<ol class="track">${steps.map(([t, s], i) => `<li class="${i < cur || o.status === 'completed' ? 'done' : i === cur ? 'now' : ''}"><div class="dot">${i < cur || o.status === 'completed' ? '✓' : i + 1}</div><div><b>${t}</b><span>${s}</span></div></li>`).join('')}</ol>`))
+  }
+  if (o.status === 'awaiting_payment' && isBuyer) {
+    p.appendChild(el(`<div><div class="prose-h" style="margin-bottom:4px">Send exactly ${usd2(o.price_usdc)} USDC to</div><div class="addr">${esc(o.pay_address || 'Generating address…')}</div></div>`))
+    const row = el('<div style="display:flex;gap:10px;flex-wrap:wrap"></div>')
+    const check = el("<button class='btn go'>I've paid, check status</button>")
+    check.onclick = async () => {
+      check.disabled = true
+      try { const d = await api.post(`/api/marketplace/orders/${o.id}/check-payment`); toast(d.order.status === 'paid' ? 'Payment received' : 'Not received yet. Try again in a minute.'); route() }
+      catch (e) { toast(e.message, 'bad'); check.disabled = false }
+    }
+    const cancel = el('<button class="btn danger">Cancel order</button>')
+    cancel.onclick = async () => {
+      if (!confirm('Cancel this order?')) return
+      try { await api.post(`/api/marketplace/orders/${o.id}/cancel`); toast('Order cancelled'); go('#/orders') }
       catch (e) { toast(e.message, 'bad') }
     }
-    card.appendChild(btn)
-    c.appendChild(card)
-  })
-  return c
+    row.appendChild(check); row.appendChild(cancel)
+    p.appendChild(row)
+  } else if (o.status === 'awaiting_payment') {
+    p.appendChild(el('<div class="callout">Waiting for the buyer to pay.</div>'))
+  }
+  if (o.status === 'paid') {
+    p.appendChild(el(`<div class="callout">${isBuyer ? 'Payment received. The seller now transfers the group to your Roblox account.' : "Payment received. Transfer the group to the buyer's Roblox account now."}${o.transfer_deadline ? ` Transfer window ends ${new Date(o.transfer_deadline).toLocaleString()}.` : ''} This page updates on its own once the transfer is confirmed.</div>`))
+  }
+  if (o.status === 'completed') p.appendChild(el(`<div class="callout">Sale complete. ${isBuyer ? 'The group is yours.' : 'Your payout is in your wallet.'}</div>`))
+  if (o.status === 'cancelled') p.appendChild(el('<div class="callout">This order was cancelled.</div>'))
+  w.appendChild(p)
+  if (['awaiting_payment', 'paid'].includes(o.status)) {
+    pollTimer = setTimeout(() => { if (location.hash === `#/order/${o.id}`) route(true) }, 6000)
+  }
+  return v
 }
 
-// ── Boot ──────────────────────────────────────────────────────────────────────
-async function boot() {
-  state.user = (await api.get('/api/me')).user
-  if (state.user) { await refresh(); return }
-  state.mktListings = (await api.get('/api/marketplace/listings')).listings
-  render()
+// ── Wallet ───────────────────────────────────────────────────────────────────
+function walletView(w) {
+  if (!state.user) return gate('Sign in to see your wallet', 'Sale payouts land in your wallet, and you can withdraw USDC from there.')
+  const v = el(`<main class="page"><div class="wrap"><div class="narrow">
+    <div class="page-head"><h1>Wallet</h1></div>
+    <div class="panel">
+      <div class="muted" style="font-size:13px;font-weight:600">Available to withdraw</div>
+      <div class="bal">${usd2(w.balance)}</div>
+      <label class="field"><span>Send to USDC address</span><input class="input" id="a" placeholder="Your wallet address" autocomplete="off"></label>
+      <label class="field"><span>Amount</span><input class="input" id="m" type="number" min="1" step="0.01" placeholder="0.00"></label>
+      <button class="btn go lg block" id="wd">Request withdrawal</button>
+    </div>
+    <h2 class="prose-h" style="margin:32px 0 12px">History</h2>
+    <div class="list" id="hist"></div>
+  </div></div></main>`)
+  v.querySelector('#wd').onclick = async (e) => {
+    e.target.disabled = true
+    try { await api.post('/api/marketplace/wallet/withdraw', { amount: v.querySelector('#m').value.trim(), toAddress: v.querySelector('#a').value.trim() }); toast('Withdrawal requested'); route() }
+    catch (err) { toast(err.message, 'bad'); e.target.disabled = false }
+  }
+  const hist = v.querySelector('#hist')
+  if (!w.ledger?.length) hist.appendChild(el('<div class="empty">No activity yet.</div>'))
+  ;(w.ledger || []).forEach((x) => {
+    const pos = x.kind === 'sale'
+    hist.appendChild(el(`<div class="list-row"><div><div class="t">${pos ? 'Sale payout' : 'Withdrawal'}</div><div class="s">${new Date(x.created_at).toLocaleString()}${x.status !== 'completed' ? ' · ' + esc(x.status) : ''}</div></div>
+      <span class="${pos ? 'amt-pos' : 'amt-neg'}">${pos ? '+' : '−'}${usd2(x.amount_usdc)}</span></div>`))
+  })
+  return v
 }
-boot()
+
+// ── Admin ────────────────────────────────────────────────────────────────────
+function adminView(orders) {
+  if (state.user?.role !== 'admin') return el('<main class="page"><div class="wrap"><div class="panel empty"><b>Admins only.</b></div></div></main>')
+  const v = el(`<main class="page"><div class="wrap">
+    <div class="page-head"><h1>Transfers to confirm</h1><p>These orders are paid. Check on Roblox that the group now belongs to the buyer, then release the payout.</p></div>
+    <div class="list"></div>
+  </div></main>`)
+  const list = v.querySelector('.list')
+  if (!orders.length) list.appendChild(el('<div class="empty"><b>Nothing waiting.</b>Paid orders show up here.</div>'))
+  orders.forEach((o) => {
+    const row = el(`<div class="list-row" style="flex-wrap:wrap">
+      <div style="min-width:0"><div class="t num">${usd2(o.price_usdc)}</div>
+        <div class="s">Buyer ${esc(o.buyer_username)} · Seller ${esc(o.seller_username)} · paid ${o.paid_at ? new Date(o.paid_at).toLocaleString() : ''}</div>
+        ${o.source_url ? `<div class="s">Source: <a href="${esc(o.source_url)}" target="_blank" rel="noopener" style="color:var(--accent)">${esc(o.source || 'link')} ↗</a>${o.source_price_usdc ? ` · cost ${usd2(o.source_price_usdc)}` : ''}</div>` : ''}
+      </div>
+    </div>`)
+    const b = el('<button class="btn go sm">Confirm transfer and pay out</button>')
+    b.onclick = async () => {
+      if (!confirm('Confirm the group transferred and release the payout?')) return
+      try { await api.post(`/api/marketplace/orders/${o.id}/finalize`); toast('Payout released'); route() }
+      catch (e) { toast(e.message, 'bad') }
+    }
+    row.appendChild(b)
+    list.appendChild(row)
+  })
+  return v
+}
+
+// ── Router ───────────────────────────────────────────────────────────────────
+async function route(quiet = false) {
+  clearTimeout(pollTimer)
+  const h = location.hash.replace(/^#/, '') || '/'
+  const parts = h.split('/').filter(Boolean)
+  const [page, id] = [parts[0] || '', parts[1] ? decodeURIComponent(parts[1]) : null]
+  try {
+    if (page === '' || page === 'market') {
+      if (!state.listingsLoaded) { shell('market', marketView()); await loadListings() }
+      shell('market', marketView())
+    } else if (page === 'game') {
+      let l = state.listings.find((x) => x.id === id)
+      if (!l) l = (await api.get(`/api/marketplace/listings/${encodeURIComponent(id)}`).catch(() => ({}))).listing
+      shell('market', gameView(l))
+    } else if (page === 'signin') {
+      if (state.user) return go('#/')
+      shell('', signinView())
+    } else if (page === 'sell') {
+      shell('sell', sellView())
+    } else if (page === 'orders') {
+      const orders = state.user ? (await api.get(`/api/marketplace/orders?box=${state.ordersBox}`)).orders : []
+      await loadListings().catch(() => {})
+      shell('orders', ordersView(orders))
+    } else if (page === 'order') {
+      const o = state.user ? (await api.get(`/api/marketplace/orders/${encodeURIComponent(id)}`).catch(() => ({}))).order : null
+      await loadListings().catch(() => {})
+      shell('orders', orderView(o))
+    } else if (page === 'wallet') {
+      const w = state.user ? await api.get('/api/marketplace/wallet') : { balance: 0, ledger: [] }
+      shell('wallet', walletView(w))
+    } else if (page === 'admin') {
+      const orders = state.user?.role === 'admin' ? (await api.get('/api/marketplace/admin/orders')).orders : []
+      shell('admin', adminView(orders))
+    } else {
+      return go('#/')
+    }
+    if (!quiet) window.scrollTo(0, 0)
+  } catch (e) {
+    toast(e.message, 'bad')
+  }
+}
+
+window.addEventListener('hashchange', () => route())
+;(async function boot() {
+  try { state.user = (await api.get('/api/me')).user } catch { state.user = null }
+  route()
+})()

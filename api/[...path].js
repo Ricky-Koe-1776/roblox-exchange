@@ -2,17 +2,18 @@
 //
 // robloxexchange.com is a marketplace for buying and selling whole Roblox
 // games (via Roblox group-ownership transfer), paid in USDC through Apirone.
-// Login is "Sign in with Roblox" via Roblox's real OAuth 2.0 / OIDC flow —
-// that also IS the account's verified Roblox identity, so no separate
-// "connect Roblox" step is needed anywhere else in the app.
+// Login is Roblox bio verification (same flow RoFlips used): the user asks
+// for a code, pastes "RE: <words>" into their Roblox profile About section,
+// and the server reads it back from users.roblox.com. That verified Roblox
+// account IS the login, so there is no separate "connect Roblox" step.
 //
 // Order completion is MANUAL: an admin confirms the Roblox group ownership
 // actually transferred to the buyer before releasing the seller's payout.
 // There is no automated Roblox-ownership poller.
 //
 // Routes (all under /api):
-//   GET  /roblox/oauth/start                 -> redirect to Roblox's authorize page
-//   GET  /roblox/oauth/callback              -> exchanges code, sets session cookie
+//   POST /roblox/challenge {username}        -> issues an "RE: ..." bio code (10 min)
+//   POST /roblox/verify    {username}        -> checks the bio, sets session cookie
 //   GET  /me                                 current user or null
 //   POST /logout
 //   GET  /marketplace/listings               active listings
@@ -37,9 +38,6 @@ import { createInvoice, getInvoiceStatus } from '../lib/apirone.mjs'
 const sql = neon(process.env.POSTGRES_URL)
 const ADMIN_USERNAMES = (process.env.ADMIN_USERNAMES || '').toLowerCase().split(',').map((s) => s.trim()).filter(Boolean)
 
-const OAUTH_AUTHORIZE_URL = 'https://apis.roblox.com/oauth/v1/authorize'
-const OAUTH_TOKEN_URL = 'https://apis.roblox.com/oauth/v1/token'
-const OAUTH_USERINFO_URL = 'https://apis.roblox.com/oauth/v1/userinfo'
 
 // ── Schema bootstrap ──────────────────────────────────────────────────────────
 let _initDone = false
@@ -115,6 +113,12 @@ async function ensureInit() {
   await sql`ALTER TABLE rex_game_listings ADD COLUMN IF NOT EXISTS source_url TEXT`
   await sql`ALTER TABLE rex_game_listings ADD COLUMN IF NOT EXISTS source_price_usdc NUMERIC`
   await sql`CREATE UNIQUE INDEX IF NOT EXISTS rex_listings_source_uq ON rex_game_listings (source, source_listing_id)`
+  await sql`
+    CREATE TABLE IF NOT EXISTS rex_roblox_challenges (
+      username   TEXT PRIMARY KEY,
+      phrase     TEXT NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL
+    )`
   _initDone = true
 }
 
@@ -180,11 +184,45 @@ async function sessionUser(req) {
   return rows[0] || null
 }
 
-// ── PKCE helpers for Roblox OAuth ─────────────────────────────────────────────
-function base64url(buf) { return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '') }
-function randomToken(bytes = 32) { return base64url(crypto.randomBytes(bytes)) }
-function codeChallenge(verifier) { return base64url(crypto.createHash('sha256').update(verifier).digest()) }
-function redirectTo(res, location) { res.statusCode = 302; res.setHeader('Location', location); res.end(); return res }
+// ── Roblox bio verification ───────────────────────────────────────────────────
+const WORDS = [
+  'apple','brave','cloud','dance','eagle','flame','grape','honey','ivory','jelly','karma','lemon',
+  'maple','noble','ocean','pearl','queen','river','storm','tiger','vivid','waltz','amber','blaze',
+  'crisp','delta','ember','frost','glide','lunar','merit','oasis','pixel','relic','swift','topaz',
+  'vigor','whirl','brisk','crest','drift','epoch','flare','glint','heron','jewel','lyric','zebra',
+]
+function generatePhrase() {
+  const w = []
+  for (let i = 0; i < 6; i++) w.push(WORDS[crypto.randomInt(WORDS.length)])
+  return `RE: ${w.join(' ')}`
+}
+function normalizeBio(s) {
+  return String(s || '').normalize('NFC')
+    .replace(/[\u00a0\u200b\u200c\u200d\ufeff\u2002\u2003\u2009\u202f\u3000]/g, ' ')
+    .replace(/[\uff1a]/g, ':')
+    .replace(/\s+/g, ' ').trim().toLowerCase()
+}
+async function lookupRobloxUser(username) {
+  try {
+    const r = await fetch('https://users.roblox.com/v1/usernames/users', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ usernames: [username], excludeBannedUsers: true }),
+    })
+    const d = (await r.json())?.data?.[0]
+    return d ? { id: String(d.id), name: d.name } : null
+  } catch { return null }
+}
+async function fetchRobloxBio(robloxId) {
+  try {
+    const d = await (await fetch(`https://users.roblox.com/v1/users/${robloxId}`)).json()
+    if (d?.description) return d.description
+  } catch {}
+  // The API returns an empty description for some accounts; fall back to the profile page meta tag.
+  try {
+    const html = await (await fetch(`https://www.roblox.com/users/${robloxId}/profile`, { headers: { 'User-Agent': 'Mozilla/5.0' } })).text()
+    return html.match(/<meta[^>]+name="description"[^>]+content="([^"]*)"/)?.[1] || ''
+  } catch { return '' }
+}
 
 // ── Handler ───────────────────────────────────────────────────────────────────
 export default async function handler(req, res) {
@@ -206,60 +244,36 @@ export default async function handler(req, res) {
     await ensureInit()
     let m
 
-    // --- Roblox OAuth (Sign in with Roblox) ---
-    if (path === '/roblox/oauth/start' && method === 'GET') {
-      const clientId = process.env.ROBLOX_OAUTH_CLIENT_ID
-      const redirectUri = process.env.ROBLOX_OAUTH_REDIRECT_URI
-      if (!clientId || !redirectUri) return res.status(500) && json({ error: 'Roblox OAuth is not configured yet' })
-      const state = randomToken(16)
-      const verifier = randomToken(32)
-      const authorizeUrl = new URL(OAUTH_AUTHORIZE_URL)
-      authorizeUrl.searchParams.set('client_id', clientId)
-      authorizeUrl.searchParams.set('redirect_uri', redirectUri)
-      authorizeUrl.searchParams.set('scope', 'openid profile')
-      authorizeUrl.searchParams.set('response_type', 'code')
-      authorizeUrl.searchParams.set('state', state)
-      authorizeUrl.searchParams.set('code_challenge', codeChallenge(verifier))
-      authorizeUrl.searchParams.set('code_challenge_method', 'S256')
-      res.setHeader('Set-Cookie', [setCookie('rex_oauth_state', state, 600), setCookie('rex_oauth_verifier', verifier, 600)])
-      return redirectTo(res, authorizeUrl.toString())
+    // --- Roblox bio verification login ---
+    if (path === '/roblox/challenge' && method === 'POST') {
+      const name = String(req.body?.username || '').trim()
+      if (!/^[A-Za-z0-9_]{3,20}$/.test(name)) return res.status(400) && json({ error: 'Enter your Roblox username.' })
+      const key = name.toLowerCase()
+      const phrase = generatePhrase()
+      await sql`
+        INSERT INTO rex_roblox_challenges (username, phrase, expires_at) VALUES (${key}, ${phrase}, NOW() + INTERVAL '10 minutes')
+        ON CONFLICT (username) DO UPDATE SET phrase=${phrase}, expires_at=NOW() + INTERVAL '10 minutes'`
+      return json({ phrase })
     }
-
-    if (path === '/roblox/oauth/callback' && method === 'GET') {
-      const clearOauthCookies = [setCookie('rex_oauth_state', '', 0), setCookie('rex_oauth_verifier', '', 0)]
-      const cookies = parseCookies(req.headers.cookie || '')
-      const code = url.searchParams.get('code')
-      const state = url.searchParams.get('state')
-      if (!code || !state || state !== cookies.rex_oauth_state || !cookies.rex_oauth_verifier) {
-        res.setHeader('Set-Cookie', clearOauthCookies)
-        return redirectTo(res, '/?error=oauth')
+    if (path === '/roblox/verify' && method === 'POST') {
+      const name = String(req.body?.username || '').trim()
+      const key = name.toLowerCase()
+      const ch = (await sql`SELECT phrase FROM rex_roblox_challenges WHERE username=${key} AND expires_at > NOW()`)[0]
+      if (!ch) return res.status(400) && json({ error: 'That code expired. Get a new one and try again.' })
+      const rbx = await lookupRobloxUser(name)
+      if (!rbx) return res.status(400) && json({ error: 'No Roblox account with that username.' })
+      const bio = await fetchRobloxBio(rbx.id)
+      if (!normalizeBio(bio).includes(normalizeBio(ch.phrase))) {
+        return res.status(400) && json({ error: "We couldn't find the code in your Roblox About section yet. Save it there, wait a few seconds, then check again." })
       }
-      const tokenRes = await fetch(OAUTH_TOKEN_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          grant_type: 'authorization_code',
-          code,
-          redirect_uri: process.env.ROBLOX_OAUTH_REDIRECT_URI,
-          client_id: process.env.ROBLOX_OAUTH_CLIENT_ID,
-          client_secret: process.env.ROBLOX_OAUTH_CLIENT_SECRET,
-          code_verifier: cookies.rex_oauth_verifier,
-        }),
-      })
-      if (!tokenRes.ok) { res.setHeader('Set-Cookie', clearOauthCookies); return redirectTo(res, '/?error=oauth') }
-      const tokens = await tokenRes.json()
-      const profileRes = await fetch(OAUTH_USERINFO_URL, { headers: { Authorization: `Bearer ${tokens.access_token}` } })
-      if (!profileRes.ok) { res.setHeader('Set-Cookie', clearOauthCookies); return redirectTo(res, '/?error=oauth') }
-      const profile = await profileRes.json()
-      const robloxId = String(profile.sub)
-      const username = profile.preferred_username || profile.name || `roblox_${robloxId}`
-      const avatarUrl = profile.picture || await fetchAvatarUrl(robloxId)
-
+      await sql`DELETE FROM rex_roblox_challenges WHERE username=${key}`
+      const robloxId = rbx.id, username = rbx.name
+      const avatarUrl = await fetchAvatarUrl(robloxId)
       let u = (await sql`SELECT id, username, role FROM users WHERE roblox_id=${robloxId}`)[0]
       if (!u) {
         const id = crypto.randomUUID()
         await sql`INSERT INTO users (id, username, roblox_id, avatar_url) VALUES (${id},${username},${robloxId},${avatarUrl}) ON CONFLICT (roblox_id) DO UPDATE SET username=${username}, avatar_url=${avatarUrl}`
-        u = (await sql`SELECT id, username, role FROM users WHERE id=${id}`)[0]
+        u = (await sql`SELECT id, username, role FROM users WHERE roblox_id=${robloxId}`)[0]
       } else {
         await sql`UPDATE users SET username=${username}, avatar_url=${avatarUrl} WHERE id=${u.id}`
       }
@@ -269,8 +283,8 @@ export default async function handler(req, res) {
       }
       const sid = crypto.randomUUID()
       await sql`INSERT INTO sessions (id, user_id) VALUES (${sid}, ${u.id})`
-      res.setHeader('Set-Cookie', [...clearOauthCookies, setCookie('rex_sid', sid, 60 * 60 * 24 * 30)])
-      return redirectTo(res, '/')
+      res.setHeader('Set-Cookie', setCookie('rex_sid', sid, 60 * 60 * 24 * 30))
+      return json({ ok: true })
     }
 
     if (path === '/me' && method === 'GET') {

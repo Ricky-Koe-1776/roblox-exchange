@@ -4,15 +4,15 @@
 // games, paid in USDC. This file is a runnable in-memory MVP so the full
 // buy -> pay -> admin-finalize flow can be exercised without a database or
 // real Roblox/Apirone credentials. Production (api/[...path].js) does the
-// real Roblox OAuth login, real Roblox ownership checks, and real Apirone
+// real Roblox bio-code login, real Roblox ownership checks, and real Apirone
 // payments against Neon Postgres.
 //
-// "Sign in with Roblox" is faked here: GET /api/roblox/oauth/start serves a
-// tiny standalone HTML page (not the SPA) with a username field. Submitting
-// it hits /api/roblox/oauth/callback?username=..., which creates/finds a demo
-// user and redirects back to '/' with a session cookie — same route names and
-// same end state as the real OAuth flow, so the SPA's login link works
-// unchanged in both environments.
+// Login is faked here: /api/roblox/challenge issues an "RE: ..." code like
+// production, but /api/roblox/verify skips the Roblox bio check and just
+// signs the username in, so the flow can be clicked through offline.
+//
+// If .seed-listings.json exists (a copy of the prod /api/marketplace/listings
+// response, gitignored), its listings are loaded so the UI has real data.
 
 import http from 'http'
 import { readFileSync } from 'fs'
@@ -67,20 +67,11 @@ function redirect(res, location, headers = {}) {
 
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.png': 'image/png', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg' }
 
-const DEMO_LOGIN_PAGE = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Sign in — demo</title>
-<style>body{background:#0e1014;color:#e7ebf2;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
-.card{background:#161a21;border:1px solid #272d38;border-radius:12px;padding:28px;max-width:340px;width:100%}
-h1{font-size:18px;margin:0 0 6px}p{color:#8b94a3;font-size:13px;margin:0 0 18px}
-input{width:100%;background:#1d222b;border:1px solid #272d38;color:#e7ebf2;border-radius:8px;padding:10px 12px;font-size:14px;box-sizing:border-box;margin-bottom:10px}
-button{width:100%;background:#4ade80;color:#07120c;border:none;border-radius:8px;padding:10px;font-weight:700;font-size:14px;cursor:pointer}</style>
-</head><body><div class="card">
-<h1>Sign in with Roblox (demo)</h1>
-<p>Local dev stand-in for the real Roblox OAuth screen. Production uses the actual Roblox login.</p>
-<form action="/api/roblox/oauth/callback" method="GET">
-<input name="username" placeholder="Pick a demo Roblox username" autofocus required pattern="[a-zA-Z0-9_]{3,20}" />
-<button type="submit">Continue</button>
-</form>
-</div></body></html>`
+try {
+  const seed = JSON.parse(readFileSync(join(__dirname, '.seed-listings.json'), 'utf8'))
+  db.gameListings.push(...(seed.listings || seed))
+  console.log(`seeded ${db.gameListings.length} listings`)
+} catch {}
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`)
@@ -112,18 +103,19 @@ const server = http.createServer(async (req, res) => {
   try {
     let m
 
-    // --- Auth (demo stand-in for Roblox OAuth) ---
-    if (path === '/api/roblox/oauth/start' && method === 'GET') {
-      res.writeHead(200, { 'Content-Type': 'text/html' })
-      return res.end(DEMO_LOGIN_PAGE)
+    // --- Auth (demo: same routes as prod, bio check skipped) ---
+    if (path === '/api/roblox/challenge' && method === 'POST') {
+      const username = String(body.username || '').trim()
+      if (!/^[a-zA-Z0-9_]{3,20}$/.test(username)) return send(res, 400, { error: 'Enter your Roblox username.' })
+      return send(res, 200, { phrase: 'RE: ' + Array.from({ length: 6 }, () => ['maple', 'river', 'ember', 'pixel', 'frost', 'lunar'][crypto.randomInt(6)]).join(' ') })
     }
-    if (path === '/api/roblox/oauth/callback' && method === 'GET') {
-      const username = (url.searchParams.get('username') || '').trim()
-      if (!/^[a-zA-Z0-9_]{3,20}$/.test(username)) return redirect(res, '/api/roblox/oauth/start')
+    if (path === '/api/roblox/verify' && method === 'POST') {
+      const username = String(body.username || '').trim()
+      if (!/^[a-zA-Z0-9_]{3,20}$/.test(username)) return send(res, 400, { error: 'Enter your Roblox username.' })
       const u = createUser(username)
       const sid = crypto.randomUUID()
       db.sessions.set(sid, u.id)
-      return redirect(res, '/', { 'Set-Cookie': `rex_sid=${sid}; Path=/; HttpOnly; Max-Age=${60 * 60 * 24 * 30}; SameSite=Lax` })
+      return send(res, 200, { ok: true }, { 'Set-Cookie': `rex_sid=${sid}; Path=/; HttpOnly; Max-Age=${60 * 60 * 24 * 30}; SameSite=Lax` })
     }
     if (path === '/api/me' && method === 'GET') {
       const u = sessionUser(req)
