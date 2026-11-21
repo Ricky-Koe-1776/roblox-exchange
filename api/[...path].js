@@ -33,7 +33,6 @@
 import { neon } from '@neondatabase/serverless'
 import crypto from 'crypto'
 import { createInvoice, getInvoiceStatus } from '../lib/apirone.mjs'
-import { prepareRows, refreshFromRoblox, writeRows } from '../lib/import-rocquire.mjs'
 
 const sql = neon(process.env.POSTGRES_URL)
 const ADMIN_USERNAMES = (process.env.ADMIN_USERNAMES || '').toLowerCase().split(',').map((s) => s.trim()).filter(Boolean)
@@ -274,15 +273,6 @@ export default async function handler(req, res) {
       return redirectTo(res, '/')
     }
 
-    // TEMPORARY one-time import endpoint (remove after use). Locked to IMPORT_TOKEN env var.
-    if (path === '/internal/import-rocquire' && method === 'POST') {
-      const tok = process.env.IMPORT_TOKEN
-      if (!tok || req.headers['x-import-token'] !== tok) return res.status(404) && json({ error: 'Not found' })
-      const raw = Array.isArray(req.body) ? req.body : []
-      const rows = prepareRows(raw, 0.10)
-      await refreshFromRoblox(rows)
-      return json({ ok: true, upserted: await writeRows(sql, rows) })
-    }
     if (path === '/me' && method === 'GET') {
       const u = await sessionUser(req)
       if (!u) return json({ user: null })
