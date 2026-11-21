@@ -5,9 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Roblox Exchange · Buy and sell Roblox games</title>
   <meta name="description" content="Browse Roblox games for sale with live player counts, visits and asking prices. Pay in USDC; funds are held until the group transfer is confirmed." />
-  <link rel="icon" type="image/png" href="/favicon.png" />
+  <link rel="icon" type="image/png" sizes="64x64" href="/favicon-64.png" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
   <meta name="theme-color" content="#f4f5f7" media="(prefers-color-scheme: light)" />
-  <meta name="theme-color" content="#0d0f12" media="(prefers-color-scheme: dark)" />
+  <meta name="theme-color" content="#0b0d14" media="(prefers-color-scheme: dark)" />
   <link rel="preconnect" href="https://tr.rbxcdn.com" />
   <meta property="og:title" content="Roblox Exchange" />
   <meta property="og:description" content="Roblox games for sale, with live player counts and asking prices. Pay in USDC, held until the transfer is confirmed." />
@@ -30,9 +31,9 @@
       --muted: #646b77;
       --line: #dfe2e7;
       --line-strong: #c6cbd3;
-      --accent: #0b7a4b;
-      --accent-ink: #f2fbf6;
-      --accent-soft: #dcf3e7;
+      --accent: #007d60;
+      --accent-ink: #ffffff;
+      --accent-soft: #d3f5ec;
       --warn: #9a5a00;
       --warn-bg: #fbeed6;
       --info: #22508f;
@@ -49,17 +50,17 @@
     }
     @media (prefers-color-scheme: dark) {
       :root {
-        --bg: #0d0f12;
-        --surface: #15181d;
-        --surface-2: #1d2128;
+        --bg: #0b0d14;
+        --surface: #13161f;
+        --surface-2: #1b1f2a;
         --ink: #eef0f3;
         --ink-2: #c9ced6;
         --muted: #8e95a2;
-        --line: #252a32;
-        --line-strong: #353b45;
-        --accent: #4fd69c;
-        --accent-ink: #06150e;
-        --accent-soft: #12301f;
+        --line: #242936;
+        --line-strong: #343a4a;
+        --accent: #00d4a3;
+        --accent-ink: #03130e;
+        --accent-soft: #0b2e27;
         --warn: #f0b45a;
         --warn-bg: #36280f;
         --info: #8db4ef;
@@ -94,7 +95,7 @@
     .topbar { position: sticky; top: 0; z-index: 20; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); }
     .topbar .wrap { display: flex; align-items: center; gap: 28px; height: 64px; }
     .brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font-family: var(--display); font-weight: 800; font-size: 19px; letter-spacing: -.02em; white-space: nowrap; }
-    .brand-mark { width: 26px; height: 26px; border-radius: var(--r-ctl); background: var(--ink); color: var(--bg); display: grid; place-items: center; font-family: var(--mono); font-size: 11px; font-weight: 700; letter-spacing: 0; }
+    .brand-logo { width: 34px; height: 34px; border-radius: var(--r-ctl); display: block; box-shadow: 0 0 0 1px var(--line); }
     .nav { display: flex; gap: 4px; flex: 1; }
     .nav a { text-decoration: none; padding: 7px 12px; border-radius: 999px; font-size: 14px; font-weight: 600; color: var(--muted); white-space: nowrap; }
     .nav a:hover { color: var(--ink); background: var(--surface-2); }
@@ -130,7 +131,7 @@
     .hero-ctas { display: flex; gap: 10px; margin-top: 28px; flex-wrap: wrap; }
 
     /* Featured: one large game + two stacked, captions under the art. */
-    .bento { display: grid; grid-template-columns: 1.5fr 1fr; grid-template-rows: 1fr 1fr; gap: 14px; }
+    .bento { display: grid; grid-template-columns: 1.3fr 1fr; grid-template-rows: 1fr 1fr; gap: 14px; }
     .tile { display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-box); overflow: hidden; text-decoration: none; transition: transform .25s cubic-bezier(.16, 1, .3, 1), box-shadow .25s; }
     .tile:hover { transform: translateY(-3px); box-shadow: var(--shadow); }
     .tile.big { grid-row: span 2; }
@@ -142,13 +143,17 @@
     .tile-cap .t { font-weight: 700; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .tile-cap .s { font-family: var(--mono); font-size: 12px; color: var(--muted); margin-top: 2px; }
     .tile-cap .p { font-family: var(--mono); font-weight: 700; font-size: 17px; letter-spacing: -.03em; white-space: nowrap; }
+    .tile:not(.big) .tile-cap { flex-direction: column; align-items: stretch; gap: 2px; }
+    .tile:not(.big) .tile-cap .row { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
     .tile.big .tile-cap { padding: 16px 18px; }
     .tile.big .tile-cap .t { font-size: 18px; }
     .tile.big .tile-cap .p { font-size: 22px; }
 
     /* Live numbers band: its own section, not part of the hero. */
     .band { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: var(--surface); }
-    .band .wrap { display: grid; grid-template-columns: repeat(3, auto); justify-content: space-between; gap: 24px; padding-top: 22px; padding-bottom: 22px; }
+    .band .wrap { display: flex; gap: 0; padding-top: 24px; padding-bottom: 24px; }
+    .band .wrap > div { padding-right: clamp(28px, 5vw, 80px); }
+    .band .wrap > div + div { padding-left: clamp(28px, 5vw, 80px); border-left: 1px solid var(--line); }
     .band .v { font-family: var(--mono); font-size: clamp(24px, 2.4vw, 36px); font-weight: 700; letter-spacing: -.04em; line-height: 1.1; }
     .band .k { font-size: 14px; color: var(--muted); }
 
@@ -208,7 +213,8 @@
     .market-head { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 16px; flex-wrap: wrap; }
     .count { font-family: var(--mono); font-size: 13px; color: var(--muted); }
     .controls { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
-    .search { position: relative; flex: 1 1 260px; }
+    .search { position: relative; flex: 0 1 460px; }
+    .controls select.input { margin-left: auto; }
     .search input { padding-left: 38px; }
     .search i { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); color: var(--muted); font-size: 17px; pointer-events: none; }
     .chips { display: flex; gap: 6px; flex-wrap: wrap; }
@@ -312,6 +318,36 @@
     .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--ink); color: var(--bg); padding: 12px 18px; border-radius: var(--r-ctl); font-weight: 600; font-size: 14px; z-index: 60; box-shadow: var(--shadow); max-width: calc(100vw - 32px); }
     .toast.bad { background: var(--danger); color: #fff; }
 
+    /* ── Large screens: bump type and spacing so it reads at desk distance ── */
+    @media (min-width: 1600px) {
+      body { font-size: 16px; }
+      .wrap { max-width: 1600px; }
+      .topbar .wrap { height: 74px; }
+      .brand { font-size: 21px; }
+      .brand-logo { width: 38px; height: 38px; }
+      .nav a { font-size: 15px; padding: 8px 14px; }
+      .btn { font-size: 15px; padding: 11px 18px; }
+      .btn.lg { font-size: 16px; padding: 15px 24px; }
+      .input { font-size: 15px; padding: 12px 14px; }
+      .search input { padding-left: 42px; }
+      .chip { font-size: 14px; padding: 8px 15px; }
+      .grid { grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 22px; }
+      .card-body { padding: 14px 16px 16px; }
+      .card-title { font-size: 16.5px; }
+      .card-meta { font-size: 13.5px; gap: 14px; }
+      .card-meta i { font-size: 15px; }
+      .card-price { font-size: 22px; }
+      .tile-cap .t { font-size: 16px; }
+      .tile-cap .s { font-size: 13px; }
+      .tile.big .tile-cap .t { font-size: 20px; }
+      .tile.big .tile-cap .p { font-size: 24px; }
+      .band .k { font-size: 15px; }
+      .how-list b { font-size: 18px; }
+      .how-list p, .prose { font-size: 16px; }
+      .stats .v { font-size: 28px; }
+      .buy-price { font-size: 44px; }
+    }
+
     /* ── Responsive ──────────────────────────────────────── */
     @media (max-width: 960px) {
       .hero { grid-template-columns: 1fr; gap: 32px; padding-top: 40px; }
@@ -330,8 +366,13 @@
       .me-name { display: none; }
       .bento { grid-template-columns: 1fr 1fr; grid-template-rows: auto; }
       .tile.big { grid-column: span 2; grid-row: auto; }
+      .tile:not(.big) .tile-cap .row { flex-direction: column-reverse; align-items: flex-start; gap: 0; }
+      .tile-cap .s { white-space: nowrap; }
       .tile:not(.big) .tile-img { aspect-ratio: 1 / 1; flex: none; }
-      .band .wrap { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+      .band .wrap > div { padding-right: 12px; flex: 1; }
+      .band .wrap > div + div { padding-left: 12px; }
+      .search { flex: none; }
+      .controls select.input { margin-left: 0; }
       .band .k { font-size: 12px; }
       .card-meta { gap: 8px; }
       .card-meta span:nth-child(2) { display: none; }

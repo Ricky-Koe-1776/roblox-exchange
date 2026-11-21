@@ -43,6 +43,11 @@ const compact = (n) => {
 }
 // Some imported text arrives with escaped newlines/quotes ("\\n"); show them as real characters.
 const cleanText = (s) => String(s || '').replace(/\\r\\n|\\n/g, '\n').replace(/\\t/g, ' ').replace(/\\"/g, '"').trim()
+// Seller titles often start with tags like "[UPD]" or "[⚔️]"; strip those for cards so the grid reads cleanly.
+const cleanTitle = (t) => {
+  const s = String(t || '').replace(/^\s*(?:[\[(（【][^\])）】]{0,24}[\])）】]\s*)+/u, '').replace(/^[\p{Extended_Pictographic}\uFE0F\u200d\s]+/u, '').trim()
+  return s || String(t || '').trim()
+}
 const go = (hash) => { if (location.hash === hash) route(); else location.hash = hash }
 function toast(msg, kind = 'ok') {
   document.querySelectorAll('.toast').forEach((t) => t.remove())
@@ -58,7 +63,7 @@ const statusLabel = { awaiting_payment: 'Awaiting payment', paid: 'Paid, transfe
 const icon = (name) => `<i class="ph ph-${name}" aria-hidden="true"></i>`
 const cardHtml = (l, i = 0) => `<a class="card rise" style="--i:${Math.min(i, 11)}" href="#/game/${encodeURIComponent(l.id)}">
   <div class="card-img">${thumb(l)}</div>
-  <div class="card-body"><div class="card-title">${esc(l.title)}</div>
+  <div class="card-body"><div class="card-title">${esc(cleanTitle(l.title))}</div>
     <div class="card-meta"><span title="Playing now">${icon('users')}${compact(l.ccu)}</span><span title="Visits">${icon('eye')}${compact(l.visits)}</span><span title="Favorites">${icon('heart')}${compact(l.favorites)}</span></div>
     <div class="card-price">${usd(l.price_usdc)}</div></div>
 </a>`
@@ -78,7 +83,7 @@ function shell(active, content) {
   const links = [['market', '#/', 'Browse'], ['sell', '#/sell', 'Sell a game'], ['orders', '#/orders', 'Orders'], ['wallet', '#/wallet', 'Wallet']]
   if (state.user?.role === 'admin') links.push(['admin', '#/admin', 'Admin'])
   const top = el(`<header class="topbar"><div class="wrap">
-    <a class="brand" href="#/" translate="no"><span class="brand-mark" aria-hidden="true">RE</span>Roblox Exchange</a>
+    <a class="brand" href="#/" translate="no"><img class="brand-logo" src="/logo-96.png" width="34" height="34" alt="">Roblox Exchange</a>
     <nav class="nav">${links.map(([k, h, t]) => `<a href="${h}" class="${active === k ? 'on' : ''}">${t}</a>`).join('')}</nav>
     <div class="me"></div>
   </div></header>`)
@@ -146,7 +151,9 @@ function marketView() {
   state.heroShown = true
   const tile = (l, big) => `<a class="tile ${big ? 'big' : ''}" href="#/game/${encodeURIComponent(l.id)}">
     <div class="tile-img">${thumb(l, big ? 'eager' : '')}</div>
-    <div class="tile-cap"><div style="min-width:0"><div class="t">${esc(l.title)}</div><div class="s">${compact(l.ccu)} playing now</div></div><div class="p">${usd(l.price_usdc)}</div></div>
+    ${big
+      ? `<div class="tile-cap"><div style="min-width:0"><div class="t">${esc(cleanTitle(l.title))}</div><div class="s">${compact(l.ccu)} playing now</div></div><div class="p">${usd(l.price_usdc)}</div></div>`
+      : `<div class="tile-cap"><div class="t">${esc(cleanTitle(l.title))}</div><div class="row"><span class="s">${compact(l.ccu)} playing</span><span class="p">${usd(l.price_usdc)}</span></div></div>`}
   </a>`
   v.appendChild(el(`<div class="wrap"><section class="hero">
     <div>
@@ -214,7 +221,7 @@ function marketView() {
       </div></div>`)
     rows.slice(0, state.market.shown).forEach((l) => {
       t.appendChild(el(`<a class="trow" role="row" href="#/game/${encodeURIComponent(l.id)}">
-        <div class="game">${thumb(l)}<div style="min-width:0"><div class="game-title">${esc(l.title)}</div>
+        <div class="game">${thumb(l)}<div style="min-width:0"><div class="game-title">${esc(cleanTitle(l.title))}</div>
           <div class="game-sub num">${compact(l.ccu)} playing · ${compact(l.visits)} visits</div></div></div>
         <div class="cell r c-play">${l.ccu.toLocaleString()}</div>
         <div class="cell r c-visits">${compact(l.visits)}</div>
