@@ -51,11 +51,18 @@ function toast(msg, kind = 'ok') {
   setTimeout(() => t.remove(), 3200)
 }
 const thumb = (l, cls = '') => l.thumbnail_url
-  ? `<img class="${cls}" src="${esc(l.thumbnail_url)}" alt="" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'ph'}))">`
-  : '<div class="ph"></div>'
+  ? `<img class="${cls}" src="${esc(l.thumbnail_url)}" alt="" width="512" height="512" ${cls === 'eager' ? 'fetchpriority="high"' : 'loading="lazy"'} onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'noimg'}))">`
+  : '<div class="noimg"></div>'
 const HOUSE_ID = 'house-roblox-exchange'
 const statusLabel = { awaiting_payment: 'Awaiting payment', paid: 'Paid, transfer pending', completed: 'Completed', cancelled: 'Cancelled', refunded: 'Refunded' }
-const searchIcon = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>'
+const icon = (name) => `<i class="ph ph-${name}" aria-hidden="true"></i>`
+const cardHtml = (l, i = 0) => `<a class="card rise" style="--i:${Math.min(i, 11)}" href="#/game/${encodeURIComponent(l.id)}">
+  <div class="card-img">${thumb(l)}</div>
+  <div class="card-body"><div class="card-title">${esc(l.title)}</div>
+    <div class="card-meta"><span title="Playing now">${icon('users')}${compact(l.ccu)}</span><span title="Visits">${icon('eye')}${compact(l.visits)}</span><span title="Favorites">${icon('heart')}${compact(l.favorites)}</span></div>
+    <div class="card-price">${usd(l.price_usdc)}</div></div>
+</a>`
+const skeletonGrid = (n = 10) => `<div class="grid" aria-busy="true" aria-label="Loading games">${Array.from({ length: n }, () => `<div class="card sk-card"><div class="card-img sk"></div><div class="card-body"><div class="sk sk-line" style="width:80%"></div><div class="sk sk-line" style="width:55%"></div><div class="sk sk-line" style="width:35%;height:18px;margin-top:8px"></div></div></div>`).join('')}</div>`
 
 async function loadListings(force = false) {
   if (state.listingsLoaded && !force) return
@@ -71,7 +78,7 @@ function shell(active, content) {
   const links = [['market', '#/', 'Browse'], ['sell', '#/sell', 'Sell a game'], ['orders', '#/orders', 'Orders'], ['wallet', '#/wallet', 'Wallet']]
   if (state.user?.role === 'admin') links.push(['admin', '#/admin', 'Admin'])
   const top = el(`<header class="topbar"><div class="wrap">
-    <a class="brand" href="#/"><span class="brand-mark">RE</span>Roblox Exchange</a>
+    <a class="brand" href="#/" translate="no"><span class="brand-mark" aria-hidden="true">RE</span>Roblox Exchange</a>
     <nav class="nav">${links.map(([k, h, t]) => `<a href="${h}" class="${active === k ? 'on' : ''}">${t}</a>`).join('')}</nav>
     <div class="me"></div>
   </div></header>`)
@@ -93,7 +100,7 @@ function shell(active, content) {
 }
 
 function gate(title, text) {
-  const v = el(`<main class="page"><div class="wrap"><div class="panel gate narrow" style="margin:0 auto">
+  const v = el(`<main id="main" class="page"><div class="wrap"><div class="panel gate narrow" style="margin:0 auto">
     <h2>${title}</h2><p>${text}</p><a class="btn go lg" href="#/signin">Sign in with your Roblox username</a>
   </div></div></main>`)
   state.returnTo = location.hash
@@ -131,40 +138,38 @@ function marketView() {
   const players = L.reduce((s, l) => s + Number(l.ccu || 0), 0)
   const prices = L.map((l) => Number(l.price_usdc)).sort((a, b) => a - b)
   const median = prices.length ? prices[Math.floor(prices.length / 2)] : 0
-  const top = [...L].sort((a, b) => Number(b.ccu || 0) - Number(a.ccu || 0)).slice(0, 4)
+  const top = [...L].sort((a, b) => Number(b.ccu || 0) - Number(a.ccu || 0)).slice(0, 3)
 
-  const v = el('<main></main>')
+  const v = el('<main id="main"></main>')
+  // Animate the hero copy only on the first paint; the view re-renders once listings arrive.
+  const heroAnim = state.heroShown ? '' : 'rise'
+  state.heroShown = true
+  const tile = (l, big) => `<a class="tile ${big ? 'big' : ''}" href="#/game/${encodeURIComponent(l.id)}">
+    <div class="tile-img">${thumb(l, big ? 'eager' : '')}</div>
+    <div class="tile-cap"><div style="min-width:0"><div class="t">${esc(l.title)}</div><div class="s">${compact(l.ccu)} playing now</div></div><div class="p">${usd(l.price_usdc)}</div></div>
+  </a>`
   v.appendChild(el(`<div class="wrap"><section class="hero">
     <div>
-      <div class="eyebrow"><span class="live-dot"></span>Live marketplace</div>
-      <h1>Buy a Roblox game that <mark>already has players.</mark></h1>
-      <p>Every game here is listed with its live player count, lifetime visits and asking price. Pay in USDC, and the money is held until the Roblox group is transferred to you.</p>
-      <div class="hero-ctas">
-        <a class="btn go lg" href="#market">Browse ${L.length ? L.length.toLocaleString() + ' ' : ''}games</a>
-        <a class="btn quiet lg" href="#/sell">Sell your game</a>
-      </div>
-      <div class="statbar">
-        <div><span class="v">${L.length.toLocaleString()}</span><span class="k">games for sale</span></div>
-        <div><span class="v">${players.toLocaleString()}</span><span class="k">playing right now</span></div>
-        <div><span class="v">${usd(median)}</span><span class="k">median asking price</span></div>
+      <h1 class="${heroAnim}">Roblox games with <em>real players.</em></h1>
+      <p class="${heroAnim}" style="--i:1">Live player counts, visits and prices on every listing. Pay in USDC, held until the group is yours.</p>
+      <div class="hero-ctas ${heroAnim}" style="--i:2">
+        <a class="btn go lg" href="#market">Browse games</a>
+        <a class="btn quiet lg" href="#/sell">Sell a game</a>
       </div>
     </div>
-    <div class="featured" aria-label="Most played games for sale">${top.map((l) => `<a class="feat" href="#/game/${encodeURIComponent(l.id)}">
-      ${thumb(l)}<span class="feat-tag"><i></i>${compact(l.ccu)} playing</span>
-      <div class="feat-body"><div class="feat-title">${esc(l.title)}</div><div class="feat-meta"><span>${compact(l.visits)} visits</span><b>${usd(l.price_usdc)}</b></div></div>
-    </a>`).join('')}</div>
-  </section>
-  <section class="process" aria-label="How buying works">
-    <div><span class="n">01</span><b>Pick a game</b><p>Compare players, visits and favorites pulled from Roblox, then open the listing.</p></div>
-    <div><span class="n">02</span><b>Pay in USDC</b><p>You get a payment address for the exact amount. Funds are held, not sent to the seller.</p></div>
-    <div><span class="n">03</span><b>Receive the group</b><p>The group that owns the game is transferred to your account, then a person confirms it and the sale closes.</p></div>
+    ${top.length >= 3 ? `<div class="bento rise" style="--i:2" aria-label="Most played games for sale">${tile(top[0], true)}${tile(top[1])}${tile(top[2])}</div>` : `<div class="bento">${skeletonGrid(0)}</div>`}
   </section></div>`))
+  v.appendChild(el(`<section class="band" aria-label="Market numbers"><div class="wrap">
+    <div><div class="v">${L.length.toLocaleString()}</div><div class="k">games for sale</div></div>
+    <div><div class="v">${players.toLocaleString()}</div><div class="k">people playing them now</div></div>
+    <div><div class="v">${usd(median)}</div><div class="k">median asking price</div></div>
+  </div></section>`))
 
-  const sec = el(`<section class="wrap" id="market" style="padding-bottom:72px"></section>`)
+  const sec = el(`<section class="wrap" id="market" style="padding-top:clamp(40px,5vw,72px);padding-bottom:clamp(56px,7vw,96px)"></section>`)
   sec.appendChild(el(`<div class="market-head"><h2 class="section-title">Games for sale</h2><span class="count" id="count"></span></div>`))
   const controls = el(`<div class="controls">
-    <div class="view-toggle" role="group" aria-label="View"><button data-v="grid" class="${state.market.view === 'grid' ? 'on' : ''}">Grid</button><button data-v="list" class="${state.market.view === 'list' ? 'on' : ''}">List</button></div>
-    <label class="search"><span class="sr">Search games</span>${searchIcon}<input class="input" id="q" type="search" placeholder="Search by game title" value="${esc(state.market.q)}"></label>
+    <div class="view-toggle" role="group" aria-label="View"><button data-v="grid" aria-label="Grid view" class="${state.market.view === 'grid' ? 'on' : ''}">${icon('squares-four')}</button><button data-v="list" aria-label="List view" class="${state.market.view === 'list' ? 'on' : ''}">${icon('list')}</button></div>
+    <label class="search"><span class="sr">Search games</span>${icon('magnifying-glass')}<input class="input" id="q" type="search" placeholder="Search by game title…" autocomplete="off" spellcheck="false" value="${esc(state.market.q)}"></label>
     <select class="input" id="sort" aria-label="Sort">${Object.entries(SORTS).map(([k, [t]]) => `<option value="${k}" ${state.market.sort === k ? 'selected' : ''}>${t}</option>`).join('')}</select>
   </div>`)
   const chips = el(`<div class="chips" style="margin-bottom:16px">${PRICE_BANDS.map(([k, t]) => `<button class="chip ${state.market.price === k ? 'on' : ''}" data-k="${k}">${t}</button>`).join('')}</div>`)
@@ -173,26 +178,33 @@ function marketView() {
   const tableWrap = el('<div></div>')
   sec.appendChild(tableWrap)
   v.appendChild(sec)
+  v.appendChild(el(`<div class="wrap"><section class="how" aria-labelledby="how-h">
+    <h2 id="how-h">How buying works</h2>
+    <ol class="how-list">
+      <li><span class="ic">${icon('magnifying-glass')}</span><div><b>Compare the numbers</b><p>Players, visits and favorites come straight from Roblox, so you can judge a game before you open the listing.</p></div></li>
+      <li><span class="ic">${icon('lock-simple')}</span><div><b>Pay in USDC</b><p>You get an address for the exact amount. The money is held and the seller is not paid yet.</p></div></li>
+      <li><span class="ic">${icon('users-three')}</span><div><b>Take over the group</b><p>The group that owns the game is transferred to your Roblox account. A person checks the transfer, then the sale closes.</p></div></li>
+    </ol>
+  </section>
+  <section class="sellband">
+    <div><h2>Own a game with players?</h2><p>List it with live stats pulled from Roblox and get paid in USDC once the transfer is confirmed.</p></div>
+    <a class="btn lg" href="#/sell">Sell a game</a>
+  </section></div>`))
 
   const head = (key, label, cls = '') => `<div class="${cls}"><button data-sort="${key}" class="${state.market.sort === key || (key === 'price' && state.market.sort.startsWith('price')) ? 'on' : ''}">${label}</button></div>`
   function drawTable() {
     const rows = filtered()
     sec.querySelector('#count').textContent = `${rows.length.toLocaleString()} ${rows.length === 1 ? 'game' : 'games'}`
     tableWrap.innerHTML = ''
-    if (!state.listingsLoaded) { tableWrap.appendChild(el('<div class="table"><div class="empty">Loading games…</div></div>')); return }
+    if (!state.listingsLoaded) { tableWrap.appendChild(el(skeletonGrid(10))); return }
     if (!rows.length) {
       tableWrap.appendChild(el(`<div class="table"><div class="empty"><b>No games match.</b>${state.listings.length ? 'Try a different search or price range.' : 'Nothing is listed yet.'}</div></div>`))
       return
     }
     if (state.market.view === 'grid') {
       const g = el('<div class="grid"></div>')
-      rows.slice(0, state.market.shown).forEach((l) => {
-        g.appendChild(el(`<a class="card" href="#/game/${encodeURIComponent(l.id)}">
-          <div class="card-img">${thumb(l)}${l.ccu ? `<span class="feat-tag"><i></i>${compact(l.ccu)}</span>` : ''}</div>
-          <div class="card-body"><div class="card-title">${esc(l.title)}</div>
-            <div class="card-foot"><span class="card-price">${usd(l.price_usdc)}</span><span class="card-stats">${compact(l.visits)} visits</span></div></div>
-        </a>`))
-      })
+      const from = g.childElementCount
+      rows.slice(0, state.market.shown).forEach((l, i) => g.appendChild(el(cardHtml(l, i - from))))
       tableWrap.appendChild(g)
       return addMore(rows)
     }
@@ -204,7 +216,7 @@ function marketView() {
       t.appendChild(el(`<a class="trow" role="row" href="#/game/${encodeURIComponent(l.id)}">
         <div class="game">${thumb(l)}<div style="min-width:0"><div class="game-title">${esc(l.title)}</div>
           <div class="game-sub num">${compact(l.ccu)} playing · ${compact(l.visits)} visits</div></div></div>
-        <div class="cell r c-play"><span class="playing ${l.ccu ? '' : 'zero'}"><i></i>${l.ccu.toLocaleString()}</span></div>
+        <div class="cell r c-play">${l.ccu.toLocaleString()}</div>
         <div class="cell r c-visits">${compact(l.visits)}</div>
         <div class="cell r c-favs">${compact(l.favorites)}</div>
         <div class="cell r price">${usd(l.price_usdc)}</div>
@@ -252,9 +264,9 @@ function marketView() {
 
 // ── Game detail ──────────────────────────────────────────────────────────────
 function gameView(l) {
-  const v = el('<main class="page"><div class="wrap"></div></main>')
+  const v = el('<main id="main" class="page"><div class="wrap"></div></main>')
   const w = v.firstElementChild
-  w.appendChild(el('<a class="back" href="#/">← All games</a>'))
+  w.appendChild(el(`<a class="back" href="#/">${icon('arrow-left')} All games</a>`))
   if (!l) { w.appendChild(el('<div class="panel empty"><b>Listing not found.</b>It may have sold or been removed.</div>')); return v }
 
   const grid = el('<div class="detail"></div>')
@@ -262,8 +274,8 @@ function gameView(l) {
     <div class="detail-top">${thumb(l)}
       <div style="min-width:0"><h1>${esc(l.title)}</h1>
         <div class="detail-links">
-          <a href="https://www.roblox.com/games/${encodeURIComponent(l.place_id)}" target="_blank" rel="noopener">Open on Roblox ↗</a>
-          <a href="https://www.roblox.com/communities/${encodeURIComponent(l.group_id)}" target="_blank" rel="noopener">Owning group ↗</a>
+          <a href="https://www.roblox.com/games/${encodeURIComponent(l.place_id)}" target="_blank" rel="noopener">Open on Roblox ${icon('arrow-up-right')}</a>
+          <a href="https://www.roblox.com/communities/${encodeURIComponent(l.group_id)}" target="_blank" rel="noopener">Owning group ${icon('arrow-up-right')}</a>
         </div>
       </div>
     </div>
@@ -318,11 +330,7 @@ function gameView(l) {
   const more = state.listings.filter((x) => x.id !== l.id).sort((a, b) => Number(b.ccu || 0) - Number(a.ccu || 0)).slice(0, 6)
   if (more.length) {
     w.appendChild(el('<h2 class="section-title" style="margin:56px 0 18px">More games for sale</h2>'))
-    w.appendChild(el(`<div class="grid">${more.map((m) => `<a class="card" href="#/game/${encodeURIComponent(m.id)}">
-      <div class="card-img">${thumb(m)}${Number(m.ccu) ? `<span class="feat-tag"><i></i>${compact(m.ccu)}</span>` : ''}</div>
-      <div class="card-body"><div class="card-title">${esc(m.title)}</div>
-        <div class="card-foot"><span class="card-price">${usd(m.price_usdc)}</span><span class="card-stats">${compact(m.visits)} visits</span></div></div>
-    </a>`).join('')}</div>`))
+    w.appendChild(el(`<div class="grid">${more.map((m, i) => cardHtml(m, i)).join('')}</div>`))
   }
   return v
 }
@@ -330,14 +338,14 @@ function gameView(l) {
 // ── Sign in (Roblox bio code) ────────────────────────────────────────────────
 function signinView() {
   const s = state.signin
-  const v = el('<main class="page"><div class="wrap"><div class="narrow" style="margin:0 auto"></div></div></main>')
+  const v = el('<main id="main" class="page"><div class="wrap"><div class="narrow" style="margin:0 auto"></div></div></main>')
   const w = v.querySelector('.narrow')
   w.appendChild(el(`<div class="page-head"><h1>Sign in</h1><p>We confirm you own your Roblox account by having you put a short code in your profile's About section. No password, and you can delete the code afterwards.</p></div>`))
   const panel = el('<div class="panel"></div>')
   w.appendChild(panel)
 
   if (!s.phrase) {
-    panel.appendChild(el(`<label class="field"><span>Roblox username</span><input class="input" id="u" autocomplete="username" placeholder="e.g. Builderman" value="${esc(s.username)}"><small>Your username, not your display name.</small></label>`))
+    panel.appendChild(el(`<label class="field"><span>Roblox username</span><input class="input" id="u" name="username" autocomplete="username" autocapitalize="off" spellcheck="false" placeholder="e.g. Builderman…" value="${esc(s.username)}"><small>Your username, not your display name.</small></label>`))
     const b = el('<button class="btn go lg block">Get my code</button>')
     const input = panel.querySelector('#u')
     const submit = async () => {
@@ -360,7 +368,7 @@ function signinView() {
     const row = el('<div style="display:flex;gap:10px;flex-wrap:wrap"></div>')
     const copy = el('<button class="btn quiet">Copy code</button>')
     copy.onclick = async () => { try { await navigator.clipboard.writeText(s.phrase); toast('Code copied') } catch { toast('Select the code and copy it', 'bad') } }
-    const open = el('<a class="btn quiet" href="https://www.roblox.com/users/profile" target="_blank" rel="noopener">Open my Roblox profile ↗</a>')
+    const open = el(`<a class="btn quiet" href="https://www.roblox.com/users/profile" target="_blank" rel="noopener">Open my Roblox profile ${icon('arrow-up-right')}</a>`)
     row.appendChild(copy); row.appendChild(open)
     panel.appendChild(row)
     const check = el('<button class="btn go lg block" style="margin-top:16px">I added it, check my profile</button>')
@@ -387,14 +395,14 @@ function signinView() {
 // ── Sell ─────────────────────────────────────────────────────────────────────
 function sellView() {
   if (!state.user) return gate('Sign in to list a game', 'Listings are tied to your verified Roblox account so buyers know who owns the group.')
-  const v = el(`<main class="page"><div class="wrap"><div class="narrow">
+  const v = el(`<main id="main" class="page"><div class="wrap"><div class="narrow">
     <div class="page-head"><h1>Sell a game</h1><p>Games sell by transferring the Roblox group that owns them. You need to be the group's owner, not just an admin. We check ownership with Roblox before the listing goes live.</p></div>
     <div class="panel">
-      <label class="field"><span>Roblox group ID</span><input class="input" id="g" inputmode="numeric" placeholder="1234567"><small>The number in the group's page URL.</small></label>
-      <label class="field"><span>Place ID</span><input class="input" id="p" inputmode="numeric" placeholder="9876543210"><small>The number in the game's page URL. We use it to pull live players, visits and favorites.</small></label>
-      <label class="field"><span>Listing title</span><input class="input" id="t" maxlength="80" placeholder="Your game's name"></label>
-      <label class="field"><span>Description</span><textarea class="input" id="d" maxlength="2000" placeholder="Revenue, update history, what's included, why you're selling"></textarea></label>
-      <label class="field"><span>Asking price (USDC)</span><input class="input" id="pr" type="number" min="1" step="0.01" placeholder="500"></label>
+      <label class="field"><span>Roblox group ID</span><input class="input" id="g" name="group_id" inputmode="numeric" autocomplete="off" placeholder="1234567…"><small>The number in the group's page URL.</small></label>
+      <label class="field"><span>Place ID</span><input class="input" id="p" name="place_id" inputmode="numeric" autocomplete="off" placeholder="9876543210…"><small>The number in the game's page URL. We use it to pull live players, visits and favorites.</small></label>
+      <label class="field"><span>Listing title</span><input class="input" id="t" name="title" maxlength="80" autocomplete="off" placeholder="Your game’s name…"></label>
+      <label class="field"><span>Description</span><textarea class="input" id="d" maxlength="2000" name="description" placeholder="Revenue, update history, what’s included, why you’re selling…"></textarea></label>
+      <label class="field"><span>Asking price (USDC)</span><input class="input" id="pr" name="price" type="number" min="1" step="0.01" autocomplete="off" placeholder="500…"></label>
       <button class="btn go lg block" id="sub">Publish listing</button>
     </div>
   </div></div></main>`)
@@ -412,7 +420,7 @@ function sellView() {
 // ── Orders ───────────────────────────────────────────────────────────────────
 function ordersView(orders) {
   if (!state.user) return gate('Sign in to see your orders', 'Purchases and sales show up here once you are signed in.')
-  const v = el(`<main class="page"><div class="wrap">
+  const v = el(`<main id="main" class="page"><div class="wrap">
     <div class="page-head"><h1>Orders</h1></div>
     <div class="seg"><button data-b="buying" class="${state.ordersBox === 'buying' ? 'on' : ''}">Buying</button><button data-b="selling" class="${state.ordersBox === 'selling' ? 'on' : ''}">Selling</button></div>
     <div class="list"></div>
@@ -434,9 +442,9 @@ function ordersView(orders) {
 
 function orderView(o) {
   if (!state.user) return gate('Sign in to view this order', 'Orders are only visible to the buyer and the seller.')
-  const v = el('<main class="page"><div class="wrap"><div class="narrow"></div></div></main>')
+  const v = el('<main id="main" class="page"><div class="wrap"><div class="narrow"></div></div></main>')
   const w = v.querySelector('.narrow')
-  w.appendChild(el('<a class="back" href="#/orders">← All orders</a>'))
+  w.appendChild(el(`<a class="back" href="#/orders">${icon('arrow-left')} All orders</a>`))
   if (!o) { w.appendChild(el('<div class="panel empty"><b>Order not found.</b></div>')); return v }
   const l = state.listings.find((x) => x.id === o.listing_id)
   const isBuyer = state.user.id === o.buyer_id
@@ -491,13 +499,13 @@ function orderView(o) {
 // ── Wallet ───────────────────────────────────────────────────────────────────
 function walletView(w) {
   if (!state.user) return gate('Sign in to see your wallet', 'Sale payouts land in your wallet, and you can withdraw USDC from there.')
-  const v = el(`<main class="page"><div class="wrap"><div class="narrow">
+  const v = el(`<main id="main" class="page"><div class="wrap"><div class="narrow">
     <div class="page-head"><h1>Wallet</h1></div>
     <div class="panel">
       <div class="muted" style="font-size:13px;font-weight:600">Available to withdraw</div>
       <div class="bal">${usd2(w.balance)}</div>
-      <label class="field"><span>Send to USDC address</span><input class="input" id="a" placeholder="Your wallet address" autocomplete="off"></label>
-      <label class="field"><span>Amount</span><input class="input" id="m" type="number" min="1" step="0.01" placeholder="0.00"></label>
+      <label class="field"><span>Send to USDC address</span><input class="input" id="a" name="usdc_address" placeholder="T… (USDC on Tron)" autocomplete="off" spellcheck="false"></label>
+      <label class="field"><span>Amount</span><input class="input" id="m" name="amount" type="number" min="1" step="0.01" autocomplete="off" placeholder="0.00…"></label>
       <button class="btn go lg block" id="wd">Request withdrawal</button>
     </div>
     <h2 class="prose-h" style="margin:32px 0 12px">History</h2>
@@ -520,8 +528,8 @@ function walletView(w) {
 
 // ── Admin ────────────────────────────────────────────────────────────────────
 function adminView(orders) {
-  if (state.user?.role !== 'admin') return el('<main class="page"><div class="wrap"><div class="panel empty"><b>Admins only.</b></div></div></main>')
-  const v = el(`<main class="page"><div class="wrap">
+  if (state.user?.role !== 'admin') return el('<main id="main" class="page"><div class="wrap"><div class="panel empty"><b>Admins only.</b></div></div></main>')
+  const v = el(`<main id="main" class="page"><div class="wrap">
     <div class="page-head"><h1>Transfers to confirm</h1><p>These orders are paid. Check on Roblox that the group now belongs to the buyer, then release the payout.</p></div>
     <div class="list"></div>
   </div></main>`)
@@ -531,7 +539,7 @@ function adminView(orders) {
     const row = el(`<div class="list-row" style="flex-wrap:wrap">
       <div style="min-width:0"><div class="t num">${usd2(o.price_usdc)}</div>
         <div class="s">Buyer ${esc(o.buyer_username)} · Seller ${esc(o.seller_username)} · paid ${o.paid_at ? new Date(o.paid_at).toLocaleString() : ''}</div>
-        ${o.source_url ? `<div class="s">Source: <a href="${esc(o.source_url)}" target="_blank" rel="noopener" style="color:var(--accent)">${esc(o.source || 'link')} ↗</a>${o.source_price_usdc ? ` · cost ${usd2(o.source_price_usdc)}` : ''}</div>` : ''}
+        ${o.source_url ? `<div class="s">Source: <a href="${esc(o.source_url)}" target="_blank" rel="noopener" style="color:var(--accent)">${esc(o.source || 'link')} ${icon('arrow-up-right')}</a>${o.source_price_usdc ? ` · cost ${usd2(o.source_price_usdc)}` : ''}</div>` : ''}
       </div>
     </div>`)
     const b = el('<button class="btn go sm">Confirm transfer and pay out</button>')
