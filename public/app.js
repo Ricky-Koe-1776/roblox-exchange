@@ -428,6 +428,7 @@ function adminView() {
       <div class="order-card-top"><b>${fmtUsd(o.price_usdc)}</b><span class="status-chip status-${o.status}">${o.status}</span></div>
       <div class="muted" style="font-size:13px">Buyer: ${escHtml(o.buyer_username)} → Seller: ${escHtml(o.seller_username)}</div>
       <div class="muted" style="font-size:12px;margin-top:4px">Paid ${o.paid_at ? new Date(o.paid_at).toLocaleString() : ''}</div>
+      ${o.source_url ? `<div style="font-size:12px;margin-top:6px">Source: <a href="${escHtml(o.source_url)}" target="_blank" rel="noopener">${escHtml(o.source || 'link')}</a>${o.source_price_usdc ? ` · cost ${fmtUsd(o.source_price_usdc)}` : ''}</div>` : ''}
     </div>`)
     const btn = el('<button class="btn" style="margin-top:8px">Verify Transfer &amp; Finalize</button>')
     btn.onclick = async () => {

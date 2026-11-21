@@ -33,6 +33,7 @@
 import { neon } from '@neondatabase/serverless'
 import crypto from 'crypto'
 import { createInvoice, getInvoiceStatus } from '../lib/apirone.mjs'
+import { prepareRows, refreshFromRoblox, writeRows } from '../lib/import-rocquire.mjs'
 
 const sql = neon(process.env.POSTGRES_URL)
 const ADMIN_USERNAMES = (process.env.ADMIN_USERNAMES || '').toLowerCase().split(',').map((s) => s.trim()).filter(Boolean)
@@ -109,6 +110,12 @@ async function ensureInit() {
       created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`
   await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT` // safety net for pre-existing tables
+  // Imported listings: where the game is sourced from, for fulfillment. Never sent to the public API.
+  await sql`ALTER TABLE rex_game_listings ADD COLUMN IF NOT EXISTS source TEXT`
+  await sql`ALTER TABLE rex_game_listings ADD COLUMN IF NOT EXISTS source_listing_id TEXT`
+  await sql`ALTER TABLE rex_game_listings ADD COLUMN IF NOT EXISTS source_url TEXT`
+  await sql`ALTER TABLE rex_game_listings ADD COLUMN IF NOT EXISTS source_price_usdc NUMERIC`
+  await sql`CREATE UNIQUE INDEX IF NOT EXISTS rex_listings_source_uq ON rex_game_listings (source, source_listing_id)`
   _initDone = true
 }
 
@@ -153,6 +160,12 @@ async function fetchGameThumbnail(universeId) {
   } catch { return null }
 }
 function isAdmin(u) { return u?.role === 'admin' }
+// Strip internal sourcing fields before a listing leaves the server.
+function publicListing(row) {
+  if (!row) return row
+  const { source, source_listing_id, source_url, source_price_usdc, ...rest } = row
+  return rest
+}
 
 // ── Cookies / sessions ────────────────────────────────────────────────────────
 function parseCookies(header = '') {
@@ -261,6 +274,15 @@ export default async function handler(req, res) {
       return redirectTo(res, '/')
     }
 
+    // TEMPORARY one-time import endpoint (remove after use). Locked to IMPORT_TOKEN env var.
+    if (path === '/internal/import-rocquire' && method === 'POST') {
+      const tok = process.env.IMPORT_TOKEN
+      if (!tok || req.headers['x-import-token'] !== tok) return res.status(404) && json({ error: 'Not found' })
+      const raw = Array.isArray(req.body) ? req.body : []
+      const rows = prepareRows(raw, 0.10)
+      await refreshFromRoblox(rows)
+      return json({ ok: true, upserted: await writeRows(sql, rows) })
+    }
     if (path === '/me' && method === 'GET') {
       const u = await sessionUser(req)
       if (!u) return json({ user: null })
@@ -280,13 +302,13 @@ export default async function handler(req, res) {
     // releases the seller's payout.
     // ============================================================
     if (path === '/marketplace/listings' && method === 'GET') {
-      const rows = await sql`SELECT * FROM rex_game_listings WHERE status='active' ORDER BY created_at DESC LIMIT 200`
-      return json({ listings: rows })
+      const rows = await sql`SELECT * FROM rex_game_listings WHERE status='active' ORDER BY created_at DESC LIMIT 1000`
+      return json({ listings: rows.map(publicListing) })
     }
     if ((m = path.match(/^\/marketplace\/listings\/([^/]+)$/)) && method === 'GET') {
       const row = (await sql`SELECT * FROM rex_game_listings WHERE id=${m[1]}`)[0]
       if (!row) return res.status(404) && json({ error: 'Listing not found' })
-      return json({ listing: row })
+      return json({ listing: publicListing(row) })
     }
     if (path === '/marketplace/listings' && method === 'POST') {
       const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
@@ -383,7 +405,7 @@ export default async function handler(req, res) {
     if (path === '/marketplace/admin/orders' && method === 'GET') {
       const u = await sessionUser(req); if (!u) return res.status(401) && json({ error: 'Not logged in' })
       if (!isAdmin(u)) return res.status(403) && json({ error: 'Admin only' })
-      const rows = await sql`SELECT * FROM rex_game_orders WHERE status='paid' ORDER BY paid_at ASC`
+      const rows = await sql`SELECT o.*, l.source, l.source_url, l.source_price_usdc FROM rex_game_orders o LEFT JOIN rex_game_listings l ON l.id=o.listing_id WHERE o.status='paid' ORDER BY o.paid_at ASC`
       return json({ orders: rows })
     }
     if ((m = path.match(/^\/marketplace\/orders\/([^/]+)\/finalize$/)) && method === 'POST') {
